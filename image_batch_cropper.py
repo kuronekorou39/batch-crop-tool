@@ -234,27 +234,45 @@ class ImageViewer(QLabel):
             
             else:
                 # リサイズ処理
-                new_rect = QRect(self.drag_start_rect)
                 delta_unscaled = QPoint(int(delta.x() / self.scale_factor), int(delta.y() / self.scale_factor))
                 
-                if 'l' in self.drag_mode:
-                    new_rect.setLeft(self.drag_start_rect.left() + delta_unscaled.x())
-                if 'r' in self.drag_mode:
-                    new_rect.setRight(self.drag_start_rect.right() + delta_unscaled.x())
-                if 't' in self.drag_mode:
-                    new_rect.setTop(self.drag_start_rect.top() + delta_unscaled.y())
-                if 'b' in self.drag_mode:
-                    new_rect.setBottom(self.drag_start_rect.bottom() + delta_unscaled.y())
+                # 新しい座標を計算
+                left = self.drag_start_rect.left()
+                top = self.drag_start_rect.top()
+                right = self.drag_start_rect.right()
+                bottom = self.drag_start_rect.bottom()
                 
-                # 最小サイズを維持
-                if new_rect.width() > 10 and new_rect.height() > 10:
+                # 各ハンドルに応じて適切な辺だけを変更
+                if self.drag_mode == 'resize_tl':
+                    left = self.drag_start_rect.left() + delta_unscaled.x()
+                    top = self.drag_start_rect.top() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_tr':
+                    right = self.drag_start_rect.right() + delta_unscaled.x()
+                    top = self.drag_start_rect.top() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_bl':
+                    left = self.drag_start_rect.left() + delta_unscaled.x()
+                    bottom = self.drag_start_rect.bottom() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_br':
+                    right = self.drag_start_rect.right() + delta_unscaled.x()
+                    bottom = self.drag_start_rect.bottom() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_t':
+                    top = self.drag_start_rect.top() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_b':
+                    bottom = self.drag_start_rect.bottom() + delta_unscaled.y()
+                elif self.drag_mode == 'resize_l':
+                    left = self.drag_start_rect.left() + delta_unscaled.x()
+                elif self.drag_mode == 'resize_r':
+                    right = self.drag_start_rect.right() + delta_unscaled.x()
+                
+                # 矩形が反転しないように制限（最小サイズ10ピクセル）
+                if right - left > 10 and bottom - top > 10:
                     # 画像境界内に制限
-                    new_rect.setLeft(max(0, new_rect.left()))
-                    new_rect.setTop(max(0, new_rect.top()))
-                    new_rect.setRight(min(self.original_pixmap.width(), new_rect.right()))
-                    new_rect.setBottom(min(self.original_pixmap.height(), new_rect.bottom()))
+                    left = max(0, left)
+                    top = max(0, top)
+                    right = min(self.original_pixmap.width(), right)
+                    bottom = min(self.original_pixmap.height(), bottom)
                     
-                    self.crop_rect = new_rect
+                    self.crop_rect = QRect(left, top, right - left, bottom - top)
             
             self.update_display()
     
