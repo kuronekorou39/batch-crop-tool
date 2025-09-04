@@ -24,7 +24,7 @@
 
 1. リポジトリをクローン
 ```bash
-git clone https://github.com/yourusername/batch-crop-tool.git
+git clone https://github.com/kuronekorou39/batch-crop-tool.git
 cd batch-crop-tool
 ```
 
