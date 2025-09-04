@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QListWidget, QLabel, QScrollArea,
     QSplitter, QMessageBox, QSpinBox, QGroupBox, QListWidgetItem,
-    QCheckBox, QProgressDialog
+    QCheckBox, QProgressDialog, QMenu, QAbstractItemView
 )
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QBrush, QCursor
@@ -333,6 +333,7 @@ class BatchImageCropper(QMainWindow):
         self.crop_mode = "absolute"  # "absolute" or "proportional"
         
         self.setup_ui()
+        self.setAcceptDrops(True)  # ドラッグ&ドロップを有効化
     
     def setup_ui(self):
         self.setWindowTitle("バッチ画像切り抜きツール")
@@ -352,6 +353,10 @@ class BatchImageCropper(QMainWindow):
         load_btn.clicked.connect(self.load_images)
         file_layout.addWidget(load_btn)
         
+        remove_btn = QPushButton("選択した画像を削除")
+        remove_btn.clicked.connect(self.remove_selected_images)
+        file_layout.addWidget(remove_btn)
+        
         clear_btn = QPushButton("リストをクリア")
         clear_btn.clicked.connect(self.clear_list)
         file_layout.addWidget(clear_btn)
@@ -364,6 +369,9 @@ class BatchImageCropper(QMainWindow):
         
         self.file_list = QListWidget()
         self.file_list.itemClicked.connect(self.on_image_selected)
+        self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self.show_context_menu)
         list_layout.addWidget(self.file_list)
         
         list_group.setLayout(list_layout)
@@ -461,44 +469,7 @@ class BatchImageCropper(QMainWindow):
         )
         
         if files:
-            size_groups = {}
-            
-            for file in files:
-                if file not in self.image_files:
-                    image = QImage(file)
-                    if not image.isNull():
-                        size = (image.width(), image.height())
-                        self.image_sizes[file] = size
-                        
-                        size_key = f"{size[0]}x{size[1]}"
-                        if size_key not in size_groups:
-                            size_groups[size_key] = []
-                        size_groups[size_key].append(file)
-                        
-                        self.image_files.append(file)
-                        item_text = f"{os.path.basename(file)} [{size[0]}x{size[1]}]"
-                        item = QListWidgetItem(item_text)
-                        item.setData(Qt.ItemDataRole.UserRole, file)
-                        
-                        if len(size_groups) > 1:
-                            item.setForeground(QColor(200, 100, 0))
-                            item.setToolTip(f"サイズ: {size[0]}x{size[1]}")
-                        
-                        self.file_list.addItem(item)
-            
-            if len(size_groups) > 1:
-                sizes_text = "\n".join([f"- {size}: {len(files)}枚" for size, files in size_groups.items()])
-                QMessageBox.information(
-                    self,
-                    "異なるサイズの画像を検出",
-                    f"複数の画像サイズが検出されました:\n{sizes_text}\n\n"
-                    "絶対座標モードでは同じサイズの画像のみが正しく切り抜かれます。\n"
-                    "比率モードを使用すると、異なるサイズでも相対的に切り抜きできます。"
-                )
-            
-            if self.current_index == -1 and self.image_files:
-                self.file_list.setCurrentRow(0)
-                self.on_image_selected(self.file_list.item(0))
+            self.add_image_files(files)
     
     def clear_list(self):
         self.file_list.clear()
@@ -506,7 +477,11 @@ class BatchImageCropper(QMainWindow):
         self.image_sizes.clear()
         self.base_image_size = None
         self.current_index = -1
-        self.image_viewer.set_image("")
+        # 画像ビューアを適切にクリア
+        self.image_viewer.original_pixmap = None
+        self.image_viewer.display_pixmap = None
+        self.image_viewer.crop_rect = QRect()
+        self.image_viewer.setPixmap(QPixmap())  # 空のPixmapをセット
         self.crop_rect = QRect()
         self.update_crop_info()
         self.crop_btn.setEnabled(False)
@@ -652,6 +627,114 @@ class BatchImageCropper(QMainWindow):
         if self.cropped_images:
             QMessageBox.information(self, "完了", f"{len(self.cropped_images)}枚の画像を切り抜きました。")
             self.save_btn.setEnabled(True)
+    
+    def remove_selected_images(self):
+        """選択された画像をリストから削除"""
+        selected_items = self.file_list.selectedItems()
+        if not selected_items:
+            return
+        
+        for item in selected_items:
+            file_path = item.data(Qt.ItemDataRole.UserRole)
+            row = self.file_list.row(item)
+            self.file_list.takeItem(row)
+            
+            if file_path in self.image_files:
+                self.image_files.remove(file_path)
+            if file_path in self.image_sizes:
+                del self.image_sizes[file_path]
+        
+        # リストが空になったら画像ビューアもクリア
+        if not self.image_files:
+            self.clear_list()
+        # まだ画像があれば最初の画像を選択
+        elif self.file_list.count() > 0:
+            self.file_list.setCurrentRow(0)
+            self.on_image_selected(self.file_list.item(0))
+    
+    def show_context_menu(self, position):
+        """ファイルリストの右クリックメニュー"""
+        if not self.file_list.selectedItems():
+            return
+        
+        menu = QMenu(self)
+        
+        remove_action = menu.addAction("選択した画像を削除")
+        remove_action.triggered.connect(self.remove_selected_images)
+        
+        menu.addSeparator()
+        
+        clear_action = menu.addAction("すべてクリア")
+        clear_action.triggered.connect(self.clear_list)
+        
+        menu.exec(self.file_list.mapToGlobal(position))
+    
+    def dragEnterEvent(self, event):
+        """ドラッグされたファイルの検証"""
+        if event.mimeData().hasUrls():
+            # 画像ファイルかチェック
+            for url in event.mimeData().urls():
+                if url.isLocalFile():
+                    file_path = url.toLocalFile()
+                    if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                        event.acceptProposedAction()
+                        return
+            event.ignore()
+        else:
+            event.ignore()
+    
+    def dropEvent(self, event):
+        """ドロップされたファイルを追加"""
+        files = []
+        for url in event.mimeData().urls():
+            if url.isLocalFile():
+                file_path = url.toLocalFile()
+                if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                    files.append(file_path)
+        
+        if files:
+            self.add_image_files(files)
+    
+    def add_image_files(self, files):
+        """画像ファイルをリストに追加（共通処理）"""
+        size_groups = {}
+        
+        for file in files:
+            if file not in self.image_files:
+                image = QImage(file)
+                if not image.isNull():
+                    size = (image.width(), image.height())
+                    self.image_sizes[file] = size
+                    
+                    size_key = f"{size[0]}x{size[1]}"
+                    if size_key not in size_groups:
+                        size_groups[size_key] = []
+                    size_groups[size_key].append(file)
+                    
+                    self.image_files.append(file)
+                    item_text = f"{os.path.basename(file)} [{size[0]}x{size[1]}]"
+                    item = QListWidgetItem(item_text)
+                    item.setData(Qt.ItemDataRole.UserRole, file)
+                    
+                    if len(size_groups) > 1:
+                        item.setForeground(QColor(200, 100, 0))
+                        item.setToolTip(f"サイズ: {size[0]}x{size[1]}")
+                    
+                    self.file_list.addItem(item)
+        
+        if len(size_groups) > 1:
+            sizes_text = "\n".join([f"- {size}: {len(files)}枚" for size, files in size_groups.items()])
+            QMessageBox.information(
+                self,
+                "異なるサイズの画像を検出",
+                f"複数の画像サイズが検出されました:\n{sizes_text}\n\n"
+                "絶対座標モードでは同じサイズの画像のみが正しく切り抜かれます。\n"
+                "比率モードを使用すると、異なるサイズでも相対的に切り抜きできます。"
+            )
+        
+        if self.current_index == -1 and self.image_files:
+            self.file_list.setCurrentRow(0)
+            self.on_image_selected(self.file_list.item(0))
     
     def save_cropped_images(self):
         if not hasattr(self, 'cropped_images') or not self.cropped_images:
