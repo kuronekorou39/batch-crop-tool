@@ -182,7 +182,9 @@ class ImageViewer(QLabel):
         x_offset = (label_rect.width() - pixmap_rect.width()) // 2
         y_offset = (label_rect.height() - pixmap_rect.height()) // 2
         
-        current_pos = event.position().toPoint() - QPoint(x_offset, y_offset)
+        # 浮動小数点精度を保持
+        current_pos_float = event.position() - QPointF(x_offset, y_offset)
+        current_pos = current_pos_float.toPoint()
         
         # カーソル変更
         if not self.is_selecting and not self.drag_mode:
@@ -219,12 +221,16 @@ class ImageViewer(QLabel):
         
         # ドラッグ中（移動・リサイズ）
         elif self.drag_mode:
-            delta = current_pos - self.drag_start_pos
+            # 浮動小数点で差分を計算してから変換
+            delta_float = QPointF(current_pos_float.x() - self.drag_start_pos.x(),
+                                 current_pos_float.y() - self.drag_start_pos.y())
+            delta_unscaled = QPointF(delta_float.x() / self.scale_factor,
+                                    delta_float.y() / self.scale_factor)
             
             if self.drag_mode == 'move':
                 # 矩形全体を移動
-                new_x = self.drag_start_rect.x() + int(delta.x() / self.scale_factor)
-                new_y = self.drag_start_rect.y() + int(delta.y() / self.scale_factor)
+                new_x = round(self.drag_start_rect.x() + delta_unscaled.x())
+                new_y = round(self.drag_start_rect.y() + delta_unscaled.y())
                 
                 # 画像境界内に制限
                 new_x = max(0, min(new_x, self.original_pixmap.width() - self.drag_start_rect.width()))
@@ -233,14 +239,12 @@ class ImageViewer(QLabel):
                 self.crop_rect = QRect(new_x, new_y, self.drag_start_rect.width(), self.drag_start_rect.height())
             
             else:
-                # リサイズ処理
-                delta_unscaled = QPoint(int(delta.x() / self.scale_factor), int(delta.y() / self.scale_factor))
-                
-                # 新しい座標を計算
-                left = self.drag_start_rect.left()
-                top = self.drag_start_rect.top()
-                right = self.drag_start_rect.right()
-                bottom = self.drag_start_rect.bottom()
+                # リサイズ処理 - 浮動小数点精度を維持
+                # 新しい座標を計算（浮動小数点）
+                left = float(self.drag_start_rect.left())
+                top = float(self.drag_start_rect.top())
+                right = float(self.drag_start_rect.right())
+                bottom = float(self.drag_start_rect.bottom())
                 
                 # 各ハンドルに応じて適切な辺だけを変更
                 if self.drag_mode == 'resize_tl':
@@ -264,6 +268,12 @@ class ImageViewer(QLabel):
                 elif self.drag_mode == 'resize_r':
                     right = self.drag_start_rect.right() + delta_unscaled.x()
                 
+                # 最後に整数に丸める
+                left = round(left)
+                top = round(top)
+                right = round(right)
+                bottom = round(bottom)
+                
                 # 矩形が反転しないように制限（最小サイズ10ピクセル）
                 if right - left > 10 and bottom - top > 10:
                     # 画像境界内に制限
@@ -272,7 +282,7 @@ class ImageViewer(QLabel):
                     right = min(self.original_pixmap.width(), right)
                     bottom = min(self.original_pixmap.height(), bottom)
                     
-                    self.crop_rect = QRect(left, top, right - left, bottom - top)
+                    self.crop_rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
             
             self.update_display()
     
