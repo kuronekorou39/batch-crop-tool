@@ -15,6 +15,7 @@ from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QBrush, QCurs
 
 class ImageViewer(QLabel):
     cropChanged = Signal(QRect)
+    cropChanging = Signal(QRect)  # リアルタイム更新用のシグナル
     
     def __init__(self):
         super().__init__()
@@ -218,12 +219,21 @@ class ImageViewer(QLabel):
             )
             
             self.update_display()
+            self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
         
         # ドラッグ中（移動・リサイズ）
         elif self.drag_mode:
             # 浮動小数点で差分を計算してから変換
             delta_float = QPointF(current_pos_float.x() - self.drag_start_pos.x(),
                                  current_pos_float.y() - self.drag_start_pos.y())
+            
+            # スケール変換前にスナップ処理（画面上のピクセル単位）
+            snap_threshold = 0.5
+            if abs(delta_float.x()) < snap_threshold:
+                delta_float.setX(0)
+            if abs(delta_float.y()) < snap_threshold:
+                delta_float.setY(0)
+            
             delta_unscaled = QPointF(delta_float.x() / self.scale_factor,
                                     delta_float.y() / self.scale_factor)
             
@@ -236,7 +246,9 @@ class ImageViewer(QLabel):
                 new_x = max(0, min(new_x, self.original_pixmap.width() - self.drag_start_rect.width()))
                 new_y = max(0, min(new_y, self.original_pixmap.height() - self.drag_start_rect.height()))
                 
-                self.crop_rect = QRect(new_x, new_y, self.drag_start_rect.width(), self.drag_start_rect.height())
+                if new_x != self.crop_rect.x() or new_y != self.crop_rect.y():
+                    self.crop_rect = QRect(new_x, new_y, self.drag_start_rect.width(), self.drag_start_rect.height())
+                    self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
             
             else:
                 # リサイズ処理 - 浮動小数点精度を維持
@@ -282,7 +294,10 @@ class ImageViewer(QLabel):
                     right = min(self.original_pixmap.width(), right)
                     bottom = min(self.original_pixmap.height(), bottom)
                     
-                    self.crop_rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
+                    new_rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
+                    if new_rect != self.crop_rect:
+                        self.crop_rect = new_rect
+                        self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
             
             self.update_display()
     
@@ -428,6 +443,7 @@ class BatchImageCropper(QMainWindow):
         
         self.image_viewer = ImageViewer()
         self.image_viewer.cropChanged.connect(self.on_crop_changed)
+        self.image_viewer.cropChanging.connect(self.on_crop_changing)  # リアルタイム更新
         
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_panel)
@@ -522,6 +538,12 @@ class BatchImageCropper(QMainWindow):
                 self.image_viewer.set_crop_rect(self.crop_rect)
     
     def on_crop_changed(self, rect: QRect):
+        self.crop_rect = rect
+        self.update_crop_info()
+        self.crop_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
+    
+    def on_crop_changing(self, rect: QRect):
+        """マウス操作中のリアルタイム更新"""
         self.crop_rect = rect
         self.update_crop_info()
         self.crop_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
