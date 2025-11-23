@@ -28,14 +28,40 @@ git clone https://github.com/kuronekorou39/batch-crop-tool.git
 cd batch-crop-tool
 ```
 
-2. 依存パッケージをインストール
+2. 仮想環境を作成
+```bash
+python -m venv venv
+```
+
+3. 仮想環境を有効化
+
+**Windows:**
+```bash
+venv\Scripts\activate
+```
+
+**Linux/Mac:**
+```bash
+source venv/bin/activate
+```
+
+4. 依存パッケージをインストール
 ```bash
 pip install -r requirements.txt
 ```
 
 ## 💻 使い方
 
-1. ツールを起動
+1. 仮想環境を有効化（まだの場合）
+```bash
+# Windows
+venv\Scripts\activate
+
+# Linux/Mac
+source venv/bin/activate
+```
+
+2. ツールを起動
 ```bash
 python image_batch_cropper.py
 ```
