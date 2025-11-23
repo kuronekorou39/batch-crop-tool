@@ -369,21 +369,44 @@ class ImageViewer(QLabel):
                 self.cropChanged.emit(self.crop_rect)
 
     def wheelEvent(self, event):
-        """マウスホイールでズーム"""
+        """マウスホイールでズーム（マウス位置を中心に）"""
         if not self.original_pixmap:
             return
 
-        # ズーム倍率の変更
-        zoom_delta = event.angleDelta().y() / 120.0  # 通常のマウスホイールは1ステップ120
-        zoom_factor = 1.1 ** zoom_delta
-
-        new_scale = self.scale_factor * zoom_factor
-        new_scale = max(self.min_scale_factor, min(self.max_scale_factor, new_scale))
-
-        if new_scale == self.scale_factor:
+        # スクロールエリアを取得
+        scroll_area = self.get_scroll_area()
+        if not scroll_area:
             return
 
-        self.user_zoomed = True  # ユーザーが手動でズームした
+        # ズーム前のマウス位置（ImageViewer座標系）
+        mouse_pos_widget = event.position()
+
+        # 画像上のピクセル座標を計算（元画像の座標）
+        pixmap_rect = self.pixmap().rect()
+        label_rect = self.rect()
+        x_offset = (label_rect.width() - pixmap_rect.width()) // 2
+        y_offset = (label_rect.height() - pixmap_rect.height()) // 2
+
+        # マウスが画像上の位置（スケール済み画像での座標）
+        mouse_on_image_x = mouse_pos_widget.x() - x_offset
+        mouse_on_image_y = mouse_pos_widget.y() - y_offset
+
+        # 元画像のピクセル座標
+        image_x = mouse_on_image_x / self.scale_factor
+        image_y = mouse_on_image_y / self.scale_factor
+
+        # ズーム倍率の変更
+        old_scale = self.scale_factor
+        zoom_delta = event.angleDelta().y() / 120.0
+        zoom_factor = 1.1 ** zoom_delta
+
+        new_scale = old_scale * zoom_factor
+        new_scale = max(self.min_scale_factor, min(self.max_scale_factor, new_scale))
+
+        if new_scale == old_scale:
+            return
+
+        self.user_zoomed = True
         self.scale_factor = new_scale
 
         # 新しいスケールで画像をスケーリング
@@ -397,6 +420,31 @@ class ImageViewer(QLabel):
 
         self.update_display()
         self.zoomChanged.emit(self.scale_factor)
+
+        # マウス位置が同じ画像座標を指すようにスクロール位置を調整
+        # viewport内でのマウス位置（グローバル座標から変換）
+        viewport = scroll_area.viewport()
+        global_mouse_pos = self.mapToGlobal(mouse_pos_widget.toPoint())
+        viewport_mouse_pos = viewport.mapFromGlobal(global_mouse_pos)
+
+        # 新しいスケールでの画像上の位置
+        new_mouse_on_image_x = image_x * self.scale_factor
+        new_mouse_on_image_y = image_y * self.scale_factor
+
+        # 新しいオフセット
+        new_pixmap_rect = self.pixmap().rect()
+        new_label_rect = self.rect()
+        new_x_offset = (new_label_rect.width() - new_pixmap_rect.width()) // 2
+        new_y_offset = (new_label_rect.height() - new_pixmap_rect.height()) // 2
+
+        # マウスがviewport内の同じ位置にいるために必要なスクロール位置
+        # ImageViewer座標 = スクロール位置 + viewport内の位置
+        # スクロール位置 = ImageViewer座標 - viewport内の位置
+        new_scroll_x = (new_mouse_on_image_x + new_x_offset) - viewport_mouse_pos.x()
+        new_scroll_y = (new_mouse_on_image_y + new_y_offset) - viewport_mouse_pos.y()
+
+        scroll_area.horizontalScrollBar().setValue(int(new_scroll_x))
+        scroll_area.verticalScrollBar().setValue(int(new_scroll_y))
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
