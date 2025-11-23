@@ -90,55 +90,86 @@ class ImageViewer(QLabel):
             self.setMinimumSize(400, 300)  # 最小サイズを設定
             return
 
-        # 表示用のPixmapを作成（元の画像サイズをベースに）
-        temp_pixmap = QPixmap(self.display_pixmap)
-        painter = QPainter(temp_pixmap)
+        # 画像をセット（矩形は描画しない）
+        self.setPixmap(self.display_pixmap)
+        # QScrollAreaでスクロールできるように、ウィジェットサイズを画像サイズに設定
+        self.setFixedSize(self.display_pixmap.size())
+        # 再描画して矩形を表示
+        self.update()
 
-        if not self.crop_rect.isEmpty():
-            # 切り抜き矩形をスケール変換
-            scaled_rect = QRect(
-                int(self.crop_rect.x() * self.scale_factor),
-                int(self.crop_rect.y() * self.scale_factor),
-                int(self.crop_rect.width() * self.scale_factor),
-                int(self.crop_rect.height() * self.scale_factor)
-            )
+    def paintEvent(self, event):
+        """画像と矩形を描画"""
+        super().paintEvent(event)
 
-            # 暗いオーバーレイ（切り抜き範囲外）
-            painter.fillRect(temp_pixmap.rect(), QBrush(QColor(0, 0, 0, 100)))
+        if not self.display_pixmap or self.crop_rect.isEmpty():
+            return
 
-            # 切り抜き範囲内を明るく表示
-            if scaled_rect.isValid():
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
-                painter.drawPixmap(scaled_rect, self.display_pixmap, scaled_rect)
+        painter = QPainter(self)
 
-            # 赤い矩形枠を描画
-            painter.setPen(QPen(QColor(255, 0, 0), 2))
-            painter.drawRect(scaled_rect)
+        # 切り抜き矩形をスケール変換
+        scaled_rect = QRect(
+            int(self.crop_rect.x() * self.scale_factor),
+            int(self.crop_rect.y() * self.scale_factor),
+            int(self.crop_rect.width() * self.scale_factor),
+            int(self.crop_rect.height() * self.scale_factor)
+        )
 
-            # ハンドル（調整用の四角）を描画
-            painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
+        # 画像の描画オフセットを計算
+        pixmap_rect = self.pixmap().rect()
+        label_rect = self.rect()
+        x_offset = (label_rect.width() - pixmap_rect.width()) // 2
+        y_offset = (label_rect.height() - pixmap_rect.height()) // 2
 
-            # 辺の中央のハンドル
-            painter.fillRect(scaled_rect.center().x() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.center().x() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.center().y() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
-            painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.center().y() - self.handle_size//2,
-                           self.handle_size, self.handle_size, QColor(255, 0, 0))
+        # オフセットを適用
+        scaled_rect.translate(x_offset, y_offset)
+
+        # 暗いオーバーレイ（切り抜き範囲外のみ）
+        # 上部
+        if scaled_rect.top() > 0:
+            painter.fillRect(0, 0, label_rect.width(), scaled_rect.top(), QBrush(QColor(0, 0, 0, 100)))
+        # 下部
+        if scaled_rect.bottom() < label_rect.height():
+            painter.fillRect(0, scaled_rect.bottom(), label_rect.width(), label_rect.height() - scaled_rect.bottom(), QBrush(QColor(0, 0, 0, 100)))
+        # 左部
+        if scaled_rect.left() > 0:
+            painter.fillRect(0, scaled_rect.top(), scaled_rect.left(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
+        # 右部
+        if scaled_rect.right() < label_rect.width():
+            painter.fillRect(scaled_rect.right(), scaled_rect.top(), label_rect.width() - scaled_rect.right(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
+
+        # 外側の赤い実線（切り取り線の外側を示す）
+        pen_outer = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.SolidLine)
+        painter.setPen(pen_outer)
+        painter.drawRect(scaled_rect)
+
+        # 内側の白い破線（切り取り線の内側を示す）
+        pen_inner = QPen(QColor(255, 255, 255), 1, Qt.PenStyle.DashLine)
+        painter.setPen(pen_inner)
+        # 1ピクセル内側に描画
+        inner_rect = scaled_rect.adjusted(1, 1, -1, -1)
+        painter.drawRect(inner_rect)
+
+        # ハンドル（調整用の四角）を描画
+        painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+
+        # 辺の中央のハンドル
+        painter.fillRect(scaled_rect.center().x() - self.handle_size//2, scaled_rect.y() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.center().x() - self.handle_size//2, scaled_rect.bottom() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.x() - self.handle_size//2, scaled_rect.center().y() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
+        painter.fillRect(scaled_rect.right() - self.handle_size//2, scaled_rect.center().y() - self.handle_size//2,
+                       self.handle_size, self.handle_size, QColor(255, 0, 0))
 
         painter.end()
-        self.setPixmap(temp_pixmap)
-        # QScrollAreaでスクロールできるように、ウィジェットサイズを画像サイズに設定
-        self.setFixedSize(temp_pixmap.size())
     
     def get_handle_at_pos(self, pos):
         """マウス位置にあるハンドルを判定"""
@@ -272,7 +303,7 @@ class ImageViewer(QLabel):
                 int(scaled_rect.height() / self.scale_factor)
             )
 
-            self.update_display()
+            self.update()  # Pixmapコピーなしで再描画
             self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
 
         # ドラッグ中（移動・リサイズ）
@@ -302,6 +333,7 @@ class ImageViewer(QLabel):
 
                 if new_x != self.crop_rect.x() or new_y != self.crop_rect.y():
                     self.crop_rect = QRect(new_x, new_y, self.drag_start_rect.width(), self.drag_start_rect.height())
+                    self.update()  # Pixmapコピーなしで再描画
                     self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
 
             else:
@@ -351,9 +383,8 @@ class ImageViewer(QLabel):
                     new_rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
                     if new_rect != self.crop_rect:
                         self.crop_rect = new_rect
+                        self.update()  # Pixmapコピーなしで再描画
                         self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
-
-            self.update_display()
     
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.RightButton:
@@ -456,7 +487,7 @@ class ImageViewer(QLabel):
 
     def set_crop_rect(self, rect: QRect):
         self.crop_rect = rect
-        self.update_display()
+        self.update()  # Pixmapコピーなしで再描画
 
     def get_scroll_area(self):
         """親のQScrollAreaを取得"""
