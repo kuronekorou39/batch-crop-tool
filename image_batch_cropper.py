@@ -678,17 +678,12 @@ class BatchImageCropper(QMainWindow):
         
         action_group = QGroupBox("操作")
         action_layout = QVBoxLayout()
-        
-        self.crop_btn = QPushButton("選択範囲で切り抜き実行")
-        self.crop_btn.clicked.connect(self.crop_images)
-        self.crop_btn.setEnabled(False)
-        action_layout.addWidget(self.crop_btn)
-        
-        self.save_btn = QPushButton("切り抜いた画像を保存...")
-        self.save_btn.clicked.connect(self.save_cropped_images)
-        self.save_btn.setEnabled(False)
-        action_layout.addWidget(self.save_btn)
-        
+
+        self.crop_and_save_btn = QPushButton("切り抜いて保存...")
+        self.crop_and_save_btn.clicked.connect(self.crop_and_save_images)
+        self.crop_and_save_btn.setEnabled(False)
+        action_layout.addWidget(self.crop_and_save_btn)
+
         action_group.setLayout(action_layout)
         left_layout.addWidget(action_group)
         
@@ -744,8 +739,7 @@ class BatchImageCropper(QMainWindow):
         self.image_viewer.setPixmap(QPixmap())  # 空のPixmapをセット
         self.crop_rect = QRect()
         self.update_crop_info()
-        self.crop_btn.setEnabled(False)
-        self.save_btn.setEnabled(False)
+        self.crop_and_save_btn.setEnabled(False)
         self.size_info_label.setText("画像サイズ: -")
     
     def on_image_selected(self, item):
@@ -775,13 +769,13 @@ class BatchImageCropper(QMainWindow):
     def on_crop_changed(self, rect: QRect):
         self.crop_rect = rect
         self.update_crop_info()
-        self.crop_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
-    
+        self.crop_and_save_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
+
     def on_crop_changing(self, rect: QRect):
         """マウス操作中のリアルタイム更新"""
         self.crop_rect = rect
         self.update_crop_info()
-        self.crop_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
+        self.crop_and_save_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
     
     def on_manual_crop_changed(self):
         self.crop_rect = QRect(
@@ -791,7 +785,7 @@ class BatchImageCropper(QMainWindow):
             self.height_spin.value()
         )
         self.image_viewer.set_crop_rect(self.crop_rect)
-        self.crop_btn.setEnabled(not self.crop_rect.isEmpty() and len(self.image_files) > 0)
+        self.crop_and_save_btn.setEnabled(not self.crop_rect.isEmpty() and len(self.image_files) > 0)
 
     def on_zoom_changed(self, scale_factor: float):
         """ズーム率変更時の更新"""
@@ -833,18 +827,24 @@ class BatchImageCropper(QMainWindow):
             self.crop_mode = "proportional"
             self.absolute_radio.setChecked(False)
     
-    def crop_images(self):
+    def crop_and_save_images(self):
+        """切り抜きと保存を一度に実行"""
         if self.crop_rect.isEmpty():
             QMessageBox.warning(self, "警告", "切り抜き範囲が設定されていません。")
             return
-        
+
         if not self.image_files:
             QMessageBox.warning(self, "警告", "画像が読み込まれていません。")
             return
-        
+
+        # 最初に保存先フォルダを選択
+        folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択")
+        if not folder:
+            return
+
         current_file = self.image_files[self.current_index]
         current_size = self.image_sizes.get(current_file)
-        
+
         if self.apply_to_all_checkbox.isChecked():
             if self.crop_mode == "absolute":
                 files_to_crop = [f for f in self.image_files if self.image_sizes.get(f) == current_size]
@@ -852,27 +852,29 @@ class BatchImageCropper(QMainWindow):
                 files_to_crop = self.image_files
         else:
             files_to_crop = [current_file]
-        
-        progress = QProgressDialog("画像を切り抜き中...", "キャンセル", 0, len(files_to_crop), self)
+
+        progress = QProgressDialog("画像を処理中...", "キャンセル", 0, len(files_to_crop), self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
-        
-        self.cropped_images = []
-        
+
+        saved_count = 0
+
         for i, file_path in enumerate(files_to_crop):
             if progress.wasCanceled():
                 break
-            
+
             progress.setValue(i)
-            progress.setLabelText(f"処理中: {os.path.basename(file_path)}")
-            
+            filename = os.path.basename(file_path)
+            progress.setLabelText(f"処理中: {filename}")
+
             image = QImage(file_path)
             if not image.isNull():
+                # 切り抜き処理
                 if self.crop_mode == "proportional" and current_size:
                     file_size = self.image_sizes.get(file_path)
                     if file_size and file_size != current_size:
                         scale_x = file_size[0] / current_size[0]
                         scale_y = file_size[1] / current_size[1]
-                        
+
                         scaled_rect = QRect(
                             int(self.crop_rect.x() * scale_x),
                             int(self.crop_rect.y() * scale_y),
@@ -884,14 +886,25 @@ class BatchImageCropper(QMainWindow):
                         cropped = image.copy(self.crop_rect)
                 else:
                     cropped = image.copy(self.crop_rect)
-                
-                self.cropped_images.append((os.path.basename(file_path), cropped))
-        
+
+                # 保存処理
+                name, ext = os.path.splitext(filename)
+                save_path = os.path.join(folder, f"{name}_cropped{ext}")
+
+                counter = 1
+                while os.path.exists(save_path):
+                    save_path = os.path.join(folder, f"{name}_cropped_{counter}{ext}")
+                    counter += 1
+
+                if cropped.save(save_path):
+                    saved_count += 1
+
         progress.setValue(len(files_to_crop))
-        
-        if self.cropped_images:
-            QMessageBox.information(self, "完了", f"{len(self.cropped_images)}枚の画像を切り抜きました。")
-            self.save_btn.setEnabled(True)
+
+        if saved_count > 0:
+            QMessageBox.information(self, "完了", f"{saved_count}枚の画像を切り抜いて保存しました。")
+        elif not progress.wasCanceled():
+            QMessageBox.warning(self, "警告", "画像の保存に失敗しました。")
     
     def remove_selected_images(self):
         """選択された画像をリストから削除"""
@@ -1001,40 +1014,6 @@ class BatchImageCropper(QMainWindow):
             self.file_list.setCurrentRow(0)
             self.on_image_selected(self.file_list.item(0))
     
-    def save_cropped_images(self):
-        if not hasattr(self, 'cropped_images') or not self.cropped_images:
-            QMessageBox.warning(self, "警告", "切り抜いた画像がありません。")
-            return
-        
-        folder = QFileDialog.getExistingDirectory(self, "保存先フォルダを選択")
-        if not folder:
-            return
-        
-        progress = QProgressDialog("画像を保存中...", "キャンセル", 0, len(self.cropped_images), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        
-        saved_count = 0
-        for i, (filename, image) in enumerate(self.cropped_images):
-            if progress.wasCanceled():
-                break
-            
-            progress.setValue(i)
-            progress.setLabelText(f"保存中: {filename}")
-            
-            name, ext = os.path.splitext(filename)
-            save_path = os.path.join(folder, f"{name}_cropped{ext}")
-            
-            counter = 1
-            while os.path.exists(save_path):
-                save_path = os.path.join(folder, f"{name}_cropped_{counter}{ext}")
-                counter += 1
-            
-            if image.save(save_path):
-                saved_count += 1
-        
-        progress.setValue(len(self.cropped_images))
-        
-        QMessageBox.information(self, "完了", f"{saved_count}枚の画像を保存しました。")
 
 
 def main():
