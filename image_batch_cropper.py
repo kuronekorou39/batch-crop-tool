@@ -874,6 +874,9 @@ class BatchImageCropper(QMainWindow):
                 # スピンボックスの最大値を画像サイズに設定
                 self.update_spin_ranges()
 
+                # リスト表示を更新（処理対象かどうかを視覚化）
+                self.update_list_item_styles()
+
             if not self.crop_rect.isEmpty():
                 self.image_viewer.set_crop_rect(self.crop_rect)
     
@@ -888,6 +891,42 @@ class BatchImageCropper(QMainWindow):
         self.update_crop_info()
         self.crop_and_save_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
     
+    def update_list_item_styles(self):
+        """選択中の画像と同じサイズかどうかで表示を変更"""
+        if self.current_index < 0 or self.current_index >= len(self.image_files):
+            return
+
+        current_file = self.image_files[self.current_index]
+        if current_file not in self.image_sizes:
+            return
+
+        current_size = self.image_sizes[current_file]
+        same_size_count = 0
+
+        for i in range(self.file_list.count()):
+            item = self.file_list.item(i)
+            file_path = item.data(Qt.ItemDataRole.UserRole)
+
+            if file_path in self.image_sizes:
+                size = self.image_sizes[file_path]
+                is_same_size = (size == current_size)
+
+                if is_same_size:
+                    # 処理対象: 通常の色
+                    item.setForeground(QColor(0, 0, 0))
+                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}\n✓ この画像は切り抜き処理されます")
+                    same_size_count += 1
+                else:
+                    # スキップ対象: 灰色
+                    item.setForeground(QColor(150, 150, 150))
+                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}\n✗ サイズが異なるためスキップされます")
+
+        # ボタンのツールチップを更新
+        if same_size_count > 0:
+            self.crop_and_save_btn.setToolTip(
+                f"設定した範囲で画像を切り抜き、\n保存先フォルダに保存します\n\n処理対象: {same_size_count}枚"
+            )
+
     def update_spin_ranges(self):
         """画像サイズに基づいてスピンボックスの範囲を更新"""
         if self.current_index < 0 or self.current_index >= len(self.image_files):
@@ -1109,17 +1148,17 @@ class BatchImageCropper(QMainWindow):
         selected_items = self.file_list.selectedItems()
         if not selected_items:
             return
-        
+
         for item in selected_items:
             file_path = item.data(Qt.ItemDataRole.UserRole)
             row = self.file_list.row(item)
             self.file_list.takeItem(row)
-            
+
             if file_path in self.image_files:
                 self.image_files.remove(file_path)
             if file_path in self.image_sizes:
                 del self.image_sizes[file_path]
-        
+
         # リストが空になったら画像ビューアもクリア
         if not self.image_files:
             self.clear_list()
@@ -1127,6 +1166,9 @@ class BatchImageCropper(QMainWindow):
         elif self.file_list.count() > 0:
             self.file_list.setCurrentRow(0)
             self.on_image_selected(self.file_list.item(0))
+        # 選択はそのままで、リストの表示だけ更新
+        elif self.current_index >= 0:
+            self.update_list_item_styles()
     
     def show_context_menu(self, position):
         """ファイルリストの右クリックメニュー"""
@@ -1191,11 +1233,8 @@ class BatchImageCropper(QMainWindow):
                     item_text = f"{os.path.basename(file)} [{size[0]}x{size[1]}]"
                     item = QListWidgetItem(item_text)
                     item.setData(Qt.ItemDataRole.UserRole, file)
-                    
-                    if len(size_groups) > 1:
-                        item.setForeground(QColor(200, 100, 0))
-                        item.setToolTip(f"サイズ: {size[0]}x{size[1]}")
-                    
+                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}")
+
                     self.file_list.addItem(item)
         
         if len(size_groups) > 1:
@@ -1210,6 +1249,9 @@ class BatchImageCropper(QMainWindow):
         if self.current_index == -1 and self.image_files:
             self.file_list.setCurrentRow(0)
             self.on_image_selected(self.file_list.item(0))
+        elif self.current_index >= 0:
+            # 既に画像が選択されている場合もリストのスタイルを更新
+            self.update_list_item_styles()
     
 
 
