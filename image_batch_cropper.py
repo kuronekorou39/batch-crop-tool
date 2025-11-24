@@ -710,14 +710,14 @@ class BatchImageCropper(QMainWindow):
         self.x_spin = QSpinBox()
         self.x_spin.setRange(0, 9999)
         self.x_spin.setToolTip("切り抜き範囲の左上X座標")
-        self.x_spin.valueChanged.connect(self.on_manual_crop_changed)
+        self.x_spin.valueChanged.connect(self.on_crop_spin_changed)
         xy_layout.addWidget(self.x_spin)
 
         xy_layout.addWidget(QLabel("Y:"))
         self.y_spin = QSpinBox()
         self.y_spin.setRange(0, 9999)
         self.y_spin.setToolTip("切り抜き範囲の左上Y座標")
-        self.y_spin.valueChanged.connect(self.on_manual_crop_changed)
+        self.y_spin.valueChanged.connect(self.on_crop_spin_changed)
         xy_layout.addWidget(self.y_spin)
 
         crop_layout.addLayout(xy_layout)
@@ -726,16 +726,16 @@ class BatchImageCropper(QMainWindow):
         wh_layout = QHBoxLayout()
         wh_layout.addWidget(QLabel("幅:"))
         self.width_spin = QSpinBox()
-        self.width_spin.setRange(0, 9999)
+        self.width_spin.setRange(1, 9999)
         self.width_spin.setToolTip("切り抜き範囲の幅")
-        self.width_spin.valueChanged.connect(self.on_manual_crop_changed)
+        self.width_spin.valueChanged.connect(self.on_crop_spin_changed)
         wh_layout.addWidget(self.width_spin)
 
         wh_layout.addWidget(QLabel("高さ:"))
         self.height_spin = QSpinBox()
-        self.height_spin.setRange(0, 9999)
+        self.height_spin.setRange(1, 9999)
         self.height_spin.setToolTip("切り抜き範囲の高さ")
-        self.height_spin.valueChanged.connect(self.on_manual_crop_changed)
+        self.height_spin.valueChanged.connect(self.on_crop_spin_changed)
         wh_layout.addWidget(self.height_spin)
 
         crop_layout.addLayout(wh_layout)
@@ -871,6 +871,9 @@ class BatchImageCropper(QMainWindow):
                 size = self.image_sizes[file_path]
                 self.size_info_label.setText(f"画像サイズ: {size[0]}x{size[1]}")
 
+                # スピンボックスの最大値を画像サイズに設定
+                self.update_spin_ranges()
+
             if not self.crop_rect.isEmpty():
                 self.image_viewer.set_crop_rect(self.crop_rect)
     
@@ -885,7 +888,65 @@ class BatchImageCropper(QMainWindow):
         self.update_crop_info()
         self.crop_and_save_btn.setEnabled(not rect.isEmpty() and len(self.image_files) > 0)
     
-    def on_manual_crop_changed(self):
+    def update_spin_ranges(self):
+        """画像サイズに基づいてスピンボックスの範囲を更新"""
+        if self.current_index < 0 or self.current_index >= len(self.image_files):
+            return
+
+        current_file = self.image_files[self.current_index]
+        if current_file not in self.image_sizes:
+            return
+
+        img_width, img_height = self.image_sizes[current_file]
+
+        # シグナルをブロックして無限ループを防ぐ
+        self.x_spin.blockSignals(True)
+        self.y_spin.blockSignals(True)
+        self.width_spin.blockSignals(True)
+        self.height_spin.blockSignals(True)
+
+        # 現在の値を取得
+        x = self.x_spin.value()
+        y = self.y_spin.value()
+        width = self.width_spin.value()
+        height = self.height_spin.value()
+
+        # X の最大値: 画像幅 - 幅
+        x_max = max(0, img_width - width)
+        self.x_spin.setRange(0, x_max)
+        if x > x_max:
+            self.x_spin.setValue(x_max)
+
+        # Y の最大値: 画像高さ - 高さ
+        y_max = max(0, img_height - height)
+        self.y_spin.setRange(0, y_max)
+        if y > y_max:
+            self.y_spin.setValue(y_max)
+
+        # 幅の最大値: 画像幅 - X
+        width_max = img_width - x
+        self.width_spin.setRange(1, width_max)
+        if width > width_max:
+            self.width_spin.setValue(width_max)
+
+        # 高さの最大値: 画像高さ - Y
+        height_max = img_height - y
+        self.height_spin.setRange(1, height_max)
+        if height > height_max:
+            self.height_spin.setValue(height_max)
+
+        # シグナルを再有効化
+        self.x_spin.blockSignals(False)
+        self.y_spin.blockSignals(False)
+        self.width_spin.blockSignals(False)
+        self.height_spin.blockSignals(False)
+
+    def on_crop_spin_changed(self):
+        """スピンボックスの値が変更されたとき"""
+        # まず範囲を更新
+        self.update_spin_ranges()
+
+        # 切り抜き矩形を更新
         self.crop_rect = QRect(
             self.x_spin.value(),
             self.y_spin.value(),
@@ -949,10 +1010,20 @@ class BatchImageCropper(QMainWindow):
     def update_crop_info(self):
         if self.crop_rect.isEmpty():
             self.crop_info_label.setText("切り抜き範囲: 未設定")
+            self.x_spin.blockSignals(True)
+            self.y_spin.blockSignals(True)
+            self.width_spin.blockSignals(True)
+            self.height_spin.blockSignals(True)
+
             self.x_spin.setValue(0)
             self.y_spin.setValue(0)
             self.width_spin.setValue(0)
             self.height_spin.setValue(0)
+
+            self.x_spin.blockSignals(False)
+            self.y_spin.blockSignals(False)
+            self.width_spin.blockSignals(False)
+            self.height_spin.blockSignals(False)
         else:
             self.crop_info_label.setText(
                 f"切り抜き範囲: ({self.crop_rect.x()}, {self.crop_rect.y()}) - "
@@ -962,16 +1033,19 @@ class BatchImageCropper(QMainWindow):
             self.y_spin.blockSignals(True)
             self.width_spin.blockSignals(True)
             self.height_spin.blockSignals(True)
-            
+
             self.x_spin.setValue(self.crop_rect.x())
             self.y_spin.setValue(self.crop_rect.y())
             self.width_spin.setValue(self.crop_rect.width())
             self.height_spin.setValue(self.crop_rect.height())
-            
+
             self.x_spin.blockSignals(False)
             self.y_spin.blockSignals(False)
             self.width_spin.blockSignals(False)
             self.height_spin.blockSignals(False)
+
+            # スピンボックスの範囲も更新
+            self.update_spin_ranges()
     
     def crop_and_save_images(self):
         """切り抜きと保存を一度に実行"""
