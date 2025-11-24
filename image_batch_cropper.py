@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QSplitter, QMessageBox, QSpinBox, QGroupBox, QListWidgetItem,
     QCheckBox, QProgressDialog, QMenu, QAbstractItemView
 )
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QBrush, QCursor
 
 
@@ -55,6 +55,8 @@ class ImageViewer(QLabel):
 
         self.user_zoomed = False  # 新しい画像をロードしたらフラグをリセット
         self.fit_to_window()
+        # スクロール位置を画像中央に設定（レイアウト更新後に実行）
+        QTimer.singleShot(0, self.center_image)
         return True
     
     def fit_to_window(self):
@@ -75,10 +77,16 @@ class ImageViewer(QLabel):
         self.scale_factor = min(scale_w, scale_h, 1.0) * 0.95
 
         scaled_size = pixmap_size * self.scale_factor
+
+        # 倍率に応じてスケーリング方式を切り替え
+        # 100%以上：FastTransformation（ピクセル境界くっきり）
+        # 100%未満：SmoothTransformation（滑らかに縮小）
+        transform_mode = Qt.TransformationMode.FastTransformation if self.scale_factor >= 1.0 else Qt.TransformationMode.SmoothTransformation
+
         self.display_pixmap = self.original_pixmap.scaled(
             scaled_size,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            transform_mode
         )
 
         self.update_display()
@@ -90,21 +98,35 @@ class ImageViewer(QLabel):
             self.setMinimumSize(400, 300)  # 最小サイズを設定
             return
 
-        # 画像をセット（矩形は描画しない）
-        self.setPixmap(self.display_pixmap)
-        # QScrollAreaでスクロールできるように、ウィジェットサイズを画像サイズに設定
-        self.setFixedSize(self.display_pixmap.size())
+        # 画像サイズの3倍のキャンバスを作成（上下左右に画像サイズ分の余白）
+        # これにより、画像を自由に移動できる
+        widget_width = self.display_pixmap.width() * 3
+        widget_height = self.display_pixmap.height() * 3
+
+        self.setFixedSize(widget_width, widget_height)
+
         # 再描画して矩形を表示
         self.update()
 
     def paintEvent(self, event):
         """画像と矩形を描画"""
-        super().paintEvent(event)
+        # 親クラスのpaintEventは呼ばない（自分で描画する）
 
-        if not self.display_pixmap or self.crop_rect.isEmpty():
+        if not self.display_pixmap:
             return
 
         painter = QPainter(self)
+
+        # 画像を中央に描画（3倍キャンバスの中央）
+        label_rect = self.rect()
+        x_offset = (label_rect.width() - self.display_pixmap.width()) // 2
+        y_offset = (label_rect.height() - self.display_pixmap.height()) // 2
+
+        painter.drawPixmap(x_offset, y_offset, self.display_pixmap)
+
+        if self.crop_rect.isEmpty():
+            painter.end()
+            return
 
         # 切り抜き矩形をスケール変換
         scaled_rect = QRect(
@@ -114,28 +136,25 @@ class ImageViewer(QLabel):
             int(self.crop_rect.height() * self.scale_factor)
         )
 
-        # 画像の描画オフセットを計算
-        pixmap_rect = self.pixmap().rect()
-        label_rect = self.rect()
-        x_offset = (label_rect.width() - pixmap_rect.width()) // 2
-        y_offset = (label_rect.height() - pixmap_rect.height()) // 2
-
         # オフセットを適用
         scaled_rect.translate(x_offset, y_offset)
 
-        # 暗いオーバーレイ（切り抜き範囲外のみ）
+        # 画像の範囲
+        image_rect = QRect(x_offset, y_offset, self.display_pixmap.width(), self.display_pixmap.height())
+
+        # 暗いオーバーレイ（画像内の切り抜き範囲外のみ）
         # 上部
-        if scaled_rect.top() > 0:
-            painter.fillRect(0, 0, label_rect.width(), scaled_rect.top(), QBrush(QColor(0, 0, 0, 100)))
+        if scaled_rect.top() > image_rect.top():
+            painter.fillRect(image_rect.left(), image_rect.top(), image_rect.width(), scaled_rect.top() - image_rect.top(), QBrush(QColor(0, 0, 0, 100)))
         # 下部
-        if scaled_rect.bottom() < label_rect.height():
-            painter.fillRect(0, scaled_rect.bottom(), label_rect.width(), label_rect.height() - scaled_rect.bottom(), QBrush(QColor(0, 0, 0, 100)))
+        if scaled_rect.bottom() < image_rect.bottom():
+            painter.fillRect(image_rect.left(), scaled_rect.bottom(), image_rect.width(), image_rect.bottom() - scaled_rect.bottom(), QBrush(QColor(0, 0, 0, 100)))
         # 左部
-        if scaled_rect.left() > 0:
-            painter.fillRect(0, scaled_rect.top(), scaled_rect.left(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
+        if scaled_rect.left() > image_rect.left():
+            painter.fillRect(image_rect.left(), scaled_rect.top(), scaled_rect.left() - image_rect.left(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
         # 右部
-        if scaled_rect.right() < label_rect.width():
-            painter.fillRect(scaled_rect.right(), scaled_rect.top(), label_rect.width() - scaled_rect.right(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
+        if scaled_rect.right() < image_rect.right():
+            painter.fillRect(scaled_rect.right(), scaled_rect.top(), image_rect.right() - scaled_rect.right(), scaled_rect.height(), QBrush(QColor(0, 0, 0, 100)))
 
         # 外側の赤い実線（切り取り線の外側を示す）
         pen_outer = QPen(QColor(255, 0, 0), 2, Qt.PenStyle.SolidLine)
@@ -171,14 +190,25 @@ class ImageViewer(QLabel):
 
         painter.end()
     
+    def get_image_offset(self):
+        """画像の描画オフセットを取得"""
+        if not self.display_pixmap:
+            return QPoint(0, 0)
+        label_rect = self.rect()
+        x_offset = (label_rect.width() - self.display_pixmap.width()) // 2
+        y_offset = (label_rect.height() - self.display_pixmap.height()) // 2
+        return QPoint(x_offset, y_offset)
+
     def get_handle_at_pos(self, pos):
         """マウス位置にあるハンドルを判定"""
         if self.crop_rect.isEmpty():
             return None
 
+        offset = self.get_image_offset()
+
         scaled_rect = QRect(
-            int(self.crop_rect.x() * self.scale_factor),
-            int(self.crop_rect.y() * self.scale_factor),
+            int(self.crop_rect.x() * self.scale_factor) + offset.x(),
+            int(self.crop_rect.y() * self.scale_factor) + offset.y(),
             int(self.crop_rect.width() * self.scale_factor),
             int(self.crop_rect.height() * self.scale_factor)
         )
@@ -227,15 +257,13 @@ class ImageViewer(QLabel):
             return
 
         if event.button() == Qt.MouseButton.LeftButton and self.display_pixmap:
-            pixmap_rect = self.pixmap().rect()
-            label_rect = self.rect()
-            x_offset = (label_rect.width() - pixmap_rect.width()) // 2
-            y_offset = (label_rect.height() - pixmap_rect.height()) // 2
+            offset = self.get_image_offset()
+            click_pos = event.position().toPoint() - offset
 
-            click_pos = event.position().toPoint() - QPoint(x_offset, y_offset)
-
-            if pixmap_rect.contains(click_pos):
-                handle = self.get_handle_at_pos(click_pos)
+            # 画像の範囲内をクリックしたか確認
+            image_rect = QRect(0, 0, self.display_pixmap.width(), self.display_pixmap.height())
+            if image_rect.contains(click_pos):
+                handle = self.get_handle_at_pos(event.position().toPoint())
 
                 if handle:
                     self.drag_mode = handle
@@ -263,18 +291,18 @@ class ImageViewer(QLabel):
                 scroll_area.verticalScrollBar().setValue(self.scroll_start_y - delta.y())
             return
 
-        pixmap_rect = self.pixmap().rect()
-        label_rect = self.rect()
-        x_offset = (label_rect.width() - pixmap_rect.width()) // 2
-        y_offset = (label_rect.height() - pixmap_rect.height()) // 2
+        offset = self.get_image_offset()
 
         # 浮動小数点精度を保持
-        current_pos_float = event.position() - QPointF(x_offset, y_offset)
+        current_pos_float = event.position() - QPointF(offset.x(), offset.y())
         current_pos = current_pos_float.toPoint()
+
+        # 画像の範囲
+        image_rect = QRect(0, 0, self.display_pixmap.width(), self.display_pixmap.height())
 
         # カーソル変更
         if not self.is_selecting and not self.drag_mode:
-            handle = self.get_handle_at_pos(current_pos)
+            handle = self.get_handle_at_pos(event.position().toPoint())
             if handle:
                 if handle == 'move':
                     self.setCursor(Qt.CursorShape.SizeAllCursor)
@@ -291,8 +319,8 @@ class ImageViewer(QLabel):
 
         # 新規選択中
         if self.is_selecting:
-            current_pos.setX(max(0, min(current_pos.x(), pixmap_rect.width())))
-            current_pos.setY(max(0, min(current_pos.y(), pixmap_rect.height())))
+            current_pos.setX(max(0, min(current_pos.x(), image_rect.width())))
+            current_pos.setY(max(0, min(current_pos.y(), image_rect.height())))
 
             scaled_rect = QRect(self.selection_start, current_pos).normalized()
 
@@ -412,15 +440,12 @@ class ImageViewer(QLabel):
         # ズーム前のマウス位置（ImageViewer座標系）
         mouse_pos_widget = event.position()
 
-        # 画像上のピクセル座標を計算（元画像の座標）
-        pixmap_rect = self.pixmap().rect()
-        label_rect = self.rect()
-        x_offset = (label_rect.width() - pixmap_rect.width()) // 2
-        y_offset = (label_rect.height() - pixmap_rect.height()) // 2
+        # 画像のオフセットを取得
+        offset = self.get_image_offset()
 
         # マウスが画像上の位置（スケール済み画像での座標）
-        mouse_on_image_x = mouse_pos_widget.x() - x_offset
-        mouse_on_image_y = mouse_pos_widget.y() - y_offset
+        mouse_on_image_x = mouse_pos_widget.x() - offset.x()
+        mouse_on_image_y = mouse_pos_widget.y() - offset.y()
 
         # 元画像のピクセル座標
         image_x = mouse_on_image_x / self.scale_factor
@@ -443,10 +468,16 @@ class ImageViewer(QLabel):
         # 新しいスケールで画像をスケーリング
         pixmap_size = self.original_pixmap.size()
         scaled_size = pixmap_size * self.scale_factor
+
+        # 倍率に応じてスケーリング方式を切り替え
+        # 100%以上：FastTransformation（ピクセル境界くっきり）
+        # 100%未満：SmoothTransformation（滑らかに縮小）
+        transform_mode = Qt.TransformationMode.FastTransformation if self.scale_factor >= 1.0 else Qt.TransformationMode.SmoothTransformation
+
         self.display_pixmap = self.original_pixmap.scaled(
             scaled_size,
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
+            transform_mode
         )
 
         self.update_display()
@@ -462,20 +493,24 @@ class ImageViewer(QLabel):
         new_mouse_on_image_x = image_x * self.scale_factor
         new_mouse_on_image_y = image_y * self.scale_factor
 
-        # 新しいオフセット
-        new_pixmap_rect = self.pixmap().rect()
-        new_label_rect = self.rect()
-        new_x_offset = (new_label_rect.width() - new_pixmap_rect.width()) // 2
-        new_y_offset = (new_label_rect.height() - new_pixmap_rect.height()) // 2
+        # 新しいオフセット（3倍キャンバスの中央）
+        new_offset = self.get_image_offset()
 
         # マウスがviewport内の同じ位置にいるために必要なスクロール位置
         # ImageViewer座標 = スクロール位置 + viewport内の位置
         # スクロール位置 = ImageViewer座標 - viewport内の位置
-        new_scroll_x = (new_mouse_on_image_x + new_x_offset) - viewport_mouse_pos.x()
-        new_scroll_y = (new_mouse_on_image_y + new_y_offset) - viewport_mouse_pos.y()
+        new_scroll_x = (new_mouse_on_image_x + new_offset.x()) - viewport_mouse_pos.x()
+        new_scroll_y = (new_mouse_on_image_y + new_offset.y()) - viewport_mouse_pos.y()
 
-        scroll_area.horizontalScrollBar().setValue(int(new_scroll_x))
-        scroll_area.verticalScrollBar().setValue(int(new_scroll_y))
+        # スクロールバーの範囲内に制限
+        h_bar = scroll_area.horizontalScrollBar()
+        v_bar = scroll_area.verticalScrollBar()
+
+        new_scroll_x = max(h_bar.minimum(), min(int(new_scroll_x), h_bar.maximum()))
+        new_scroll_y = max(v_bar.minimum(), min(int(new_scroll_y), v_bar.maximum()))
+
+        h_bar.setValue(new_scroll_x)
+        v_bar.setValue(new_scroll_y)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -498,6 +533,35 @@ class ImageViewer(QLabel):
             if isinstance(scroll_area, QScrollArea):
                 return scroll_area
         return None
+
+    def center_image(self):
+        """スクロール位置を調整して画像を中央に表示"""
+        if not self.display_pixmap:
+            return
+
+        scroll_area = self.get_scroll_area()
+        if not scroll_area:
+            return
+
+        # 3倍キャンバスの中央に画像が描画されているので、
+        # スクロール位置を画像の中央に合わせる
+        # 画像の中央位置（ウィジェット座標系）
+        # 3倍キャンバスの中央 = 画像サイズ * 3 / 2
+        image_center_x = self.display_pixmap.width() * 3 // 2
+        image_center_y = self.display_pixmap.height() * 3 // 2
+
+        # viewportのサイズ
+        viewport = scroll_area.viewport()
+        viewport_width = viewport.width()
+        viewport_height = viewport.height()
+
+        # 画像の中央がviewportの中央に来るようなスクロール位置
+        scroll_x = image_center_x - viewport_width // 2
+        scroll_y = image_center_y - viewport_height // 2
+
+        # スクロールバーに設定
+        scroll_area.horizontalScrollBar().setValue(scroll_x)
+        scroll_area.verticalScrollBar().setValue(scroll_y)
 
 
 class BatchImageCropper(QMainWindow):
