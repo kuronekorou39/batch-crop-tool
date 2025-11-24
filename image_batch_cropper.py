@@ -708,8 +708,16 @@ class BatchImageCropper(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(left_panel)
         splitter.addWidget(scroll_area)
-        splitter.setSizes([350, 850])
-        
+        splitter.setSizes([250, 950])
+
+        # 左側のパネルは固定幅、右側の画像エリアだけが伸縮する
+        splitter.setStretchFactor(0, 0)  # 左側は伸縮しない
+        splitter.setStretchFactor(1, 1)  # 右側だけが伸縮する
+
+        # 両側のパネルに最小幅を設定（これ以上小さくできないようにする）
+        left_panel.setMinimumWidth(200)
+        scroll_area.setMinimumWidth(400)
+
         main_layout.addWidget(splitter)
     
     def load_images(self):
