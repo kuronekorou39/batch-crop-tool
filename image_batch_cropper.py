@@ -590,19 +590,31 @@ class BatchImageCropper(QMainWindow):
         
         file_group = QGroupBox("ファイル管理")
         file_layout = QVBoxLayout()
-        
+
+        # 画像を追加ボタン
         load_btn = QPushButton("画像を追加...")
+        load_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton))
+        load_btn.setMinimumHeight(40)
+        load_btn.setToolTip("切り抜きたい画像ファイルを選択します\n(PNG, JPG, BMP, GIF対応)")
         load_btn.clicked.connect(self.load_images)
         file_layout.addWidget(load_btn)
-        
+
+        # 選択した画像を削除ボタン
         remove_btn = QPushButton("選択した画像を削除")
+        remove_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogDiscardButton))
+        remove_btn.setMinimumHeight(40)
+        remove_btn.setToolTip("リストで選択中の画像を削除します\n(Ctrl/Shiftキーで複数選択可能)")
         remove_btn.clicked.connect(self.remove_selected_images)
         file_layout.addWidget(remove_btn)
-        
+
+        # リストをクリアボタン
         clear_btn = QPushButton("リストをクリア")
+        clear_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogResetButton))
+        clear_btn.setMinimumHeight(40)
+        clear_btn.setToolTip("すべての画像をリストから削除します")
         clear_btn.clicked.connect(self.clear_list)
         file_layout.addWidget(clear_btn)
-        
+
         file_group.setLayout(file_layout)
         left_layout.addWidget(file_group)
         
@@ -679,9 +691,20 @@ class BatchImageCropper(QMainWindow):
         action_group = QGroupBox("操作")
         action_layout = QVBoxLayout()
 
+        # 切り抜いて保存ボタン
         self.crop_and_save_btn = QPushButton("切り抜いて保存...")
+        self.crop_and_save_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton))
+        self.crop_and_save_btn.setMinimumHeight(50)
+        self.crop_and_save_btn.setToolTip("設定した範囲で画像を切り抜き、\n保存先フォルダに保存します")
         self.crop_and_save_btn.clicked.connect(self.crop_and_save_images)
         self.crop_and_save_btn.setEnabled(False)
+
+        # ボタンのフォントサイズを大きくして目立たせる
+        font = self.crop_and_save_btn.font()
+        font.setPointSize(font.pointSize() + 2)
+        font.setBold(True)
+        self.crop_and_save_btn.setFont(font)
+
         action_layout.addWidget(self.crop_and_save_btn)
 
         action_group.setLayout(action_layout)
