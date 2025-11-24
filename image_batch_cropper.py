@@ -298,6 +298,45 @@ class VideoProcessorThread(QThread):
         self.all_completed.emit(saved_count)
 
 
+class FileListItemWidget(QWidget):
+    """ファイルリストのカスタムアイテムウィジェット（2行表示）"""
+    def __init__(self, filename: str, size_text: str, file_type: str):
+        super().__init__()
+        layout = QVBoxLayout()
+        layout.setContentsMargins(5, 3, 5, 3)
+        layout.setSpacing(2)
+
+        # 1行目: アイコン + ファイル名
+        name_layout = QHBoxLayout()
+        name_layout.setContentsMargins(0, 0, 0, 0)
+
+        type_icon = "🎬" if file_type == 'video' else "🖼️"
+        self.name_label = QLabel(f"{type_icon} {filename}")
+        self.name_label.setStyleSheet("font-weight: normal; font-size: 11px;")
+        name_layout.addWidget(self.name_label)
+        name_layout.addStretch()
+
+        layout.addLayout(name_layout)
+
+        # 2行目: サイズ情報
+        self.size_label = QLabel(f"  {size_text}")
+        self.size_label.setStyleSheet("color: #888; font-size: 10px;")
+        layout.addWidget(self.size_label)
+
+        self.setLayout(layout)
+        self.normal_color = "#000"
+        self.disabled_color = "#999"
+
+    def set_enabled_style(self, enabled: bool):
+        """有効/無効スタイルを設定"""
+        if enabled:
+            self.name_label.setStyleSheet("font-weight: normal; font-size: 11px; color: #000;")
+            self.size_label.setStyleSheet("font-size: 10px; color: #888;")
+        else:
+            self.name_label.setStyleSheet("font-weight: normal; font-size: 11px; color: #999;")
+            self.size_label.setStyleSheet("font-size: 10px; color: #bbb;")
+
+
 class ImageViewer(QLabel):
     cropChanged = Signal(QRect)
     cropChanging = Signal(QRect)  # リアルタイム更新用のシグナル
@@ -1227,14 +1266,17 @@ class BatchImageCropper(QMainWindow):
                 size = self.image_sizes[file_path]
                 is_same_size = (size == current_size)
 
+                # カスタムウィジェットのスタイルを更新
+                widget = self.file_list.itemWidget(item)
+                if widget and isinstance(widget, FileListItemWidget):
+                    widget.set_enabled_style(is_same_size)
+
                 if is_same_size:
-                    # 処理対象: 通常の色
-                    item.setForeground(QColor(0, 0, 0))
-                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}\n✓ この画像は切り抜き処理されます")
+                    # 処理対象
+                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}\n✓ このファイルは切り抜き処理されます")
                     same_size_count += 1
                 else:
-                    # スキップ対象: 灰色
-                    item.setForeground(QColor(150, 150, 150))
+                    # スキップ対象
                     item.setToolTip(f"サイズ: {size[0]}x{size[1]}\n✗ サイズが異なるためスキップされます")
 
         # ボタンのツールチップを更新
@@ -1665,16 +1707,21 @@ class BatchImageCropper(QMainWindow):
 
                     self.image_files.append(file)
 
-                    # アイコンの表示
-                    type_icon = "🎬" if file_type == 'video' else "🖼️"
-                    item_text = f"{type_icon} {os.path.basename(file)} [{size[0]}x{size[1]}]"
-                    item = QListWidgetItem(item_text)
+                    # カスタムウィジェットを作成
+                    filename = os.path.basename(file)
+                    size_text = f"{size[0]} × {size[1]}"
+                    widget = FileListItemWidget(filename, size_text, file_type)
+
+                    # リストアイテムを作成
+                    item = QListWidgetItem()
                     item.setData(Qt.ItemDataRole.UserRole, file)
+                    item.setSizeHint(widget.sizeHint())
 
                     type_label = "動画" if file_type == 'video' else "画像"
                     item.setToolTip(f"{type_label}\nサイズ: {size[0]}x{size[1]}")
 
                     self.file_list.addItem(item)
+                    self.file_list.setItemWidget(item, widget)
 
         if len(size_groups) > 1:
             sizes_text = "\n".join([f"- {size}: {len(files)}個" for size, files in size_groups.items()])
