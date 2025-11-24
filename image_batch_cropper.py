@@ -5,6 +5,7 @@ import subprocess
 import tempfile
 import re
 import threading
+import time
 from pathlib import Path
 from typing import List, Optional, Tuple
 from PySide6.QtWidgets import (
@@ -107,7 +108,7 @@ def get_video_duration(file_path: str) -> float:
 
 
 def crop_video_with_ffmpeg(input_path: str, output_path: str, x: int, y: int, width: int, height: int,
-                           use_gpu: bool = False, progress_callback=None) -> bool:
+                           use_gpu: bool = False, progress_callback=None, cancel_check=None) -> bool:
     """ffmpegを使用して動画をトリミング
 
     Args:
@@ -116,7 +117,9 @@ def crop_video_with_ffmpeg(input_path: str, output_path: str, x: int, y: int, wi
         x, y, width, height: トリミング範囲
         use_gpu: GPU（NVENC）エンコードを使用するか
         progress_callback: 進捗コールバック関数 (percent: float) -> None
+        cancel_check: キャンセルチェック関数 () -> bool（Trueならキャンセル）
     """
+    process = None
     try:
         # 動画の長さを取得
         duration = get_video_duration(input_path)
@@ -136,9 +139,6 @@ def crop_video_with_ffmpeg(input_path: str, output_path: str, x: int, y: int, wi
                 '-cq', '23',  # 品質（0-51、低いほど高品質）
                 '-b:v', '0'   # VBRモード
             ])
-        else:
-            # CPU エンコード（デフォルト）
-            pass
 
         cmd.extend([
             '-c:a', 'copy',  # 音声はそのままコピー
@@ -157,36 +157,81 @@ def crop_video_with_ffmpeg(input_path: str, output_path: str, x: int, y: int, wi
         )
 
         # 進捗を監視（stderrから読み取る）
-        if progress_callback and duration > 0:
-            def read_stderr():
-                for line in process.stderr:
-                    # ffmpegはstderrに進捗情報を出力
-                    if 'time=' in line:
-                        try:
-                            # time=00:01:23.45 の形式から秒数を抽出
-                            time_match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
-                            if time_match:
-                                hours = int(time_match.group(1))
-                                minutes = int(time_match.group(2))
-                                seconds = float(time_match.group(3))
-                                current_time = hours * 3600 + minutes * 60 + seconds
-                                percent = min(100.0, (current_time / duration) * 100.0)
-                                progress_callback(percent)
-                        except (ValueError, AttributeError):
-                            pass
+        cancelled = False
+        stderr_output = []
 
-            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
-            stderr_thread.start()
+        def read_stderr():
+            nonlocal cancelled
+            for line in process.stderr:
+                stderr_output.append(line)
 
-            process.wait()
+                # ffmpegはstderrに進捗情報を出力
+                if progress_callback and duration > 0 and 'time=' in line:
+                    try:
+                        # time=00:01:23.45 の形式から秒数を抽出
+                        time_match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
+                        if time_match:
+                            hours = int(time_match.group(1))
+                            minutes = int(time_match.group(2))
+                            seconds = float(time_match.group(3))
+                            current_time = hours * 3600 + minutes * 60 + seconds
+                            percent = min(100.0, (current_time / duration) * 100.0)
+                            progress_callback(percent)
+                    except (ValueError, AttributeError):
+                        pass
+
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+        stderr_thread.start()
+
+        # キャンセルチェックをしながらプロセスの完了を待つ
+        while process.poll() is None:
+            # キャンセルチェック
+            if cancel_check and cancel_check():
+                cancelled = True
+                break
+            # 0.1秒ごとにチェック
+            time.sleep(0.1)
+
+        # キャンセルされた場合
+        if cancelled:
+            if process.poll() is None:  # まだ実行中なら
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except:
+                    # タイムアウトしたら強制終了
+                    process.kill()
+                    process.wait()
+
             stderr_thread.join(timeout=1)
-        else:
-            # コールバックがない場合は単純に待機
-            process.wait()
 
+            # 不完全なファイルを削除
+            if os.path.exists(output_path):
+                try:
+                    os.remove(output_path)
+                    print(f"キャンセルされたため、不完全なファイルを削除しました: {output_path}")
+                except Exception as e:
+                    print(f"警告: 不完全なファイルの削除に失敗しました: {output_path} - {e}")
+            return False
+
+        # 正常終了を待つ
+        stderr_thread.join(timeout=1)
         return process.returncode == 0
     except Exception as e:
         print(f"エラー: 動画のトリミング中に問題が発生しました: {e}")
+        # エラー時もプロセスをクリーンアップ
+        if process and process.poll() is None:
+            try:
+                process.terminate()
+                process.wait(timeout=5)
+            except:
+                pass
+        # 不完全なファイルを削除
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+            except:
+                pass
         return False
 
 
@@ -231,13 +276,18 @@ class VideoProcessorThread(QThread):
                 if not self._is_cancelled:
                     self.progress_updated.emit(i, percent)
 
+            # キャンセルチェック
+            def cancel_check():
+                return self._is_cancelled
+
             # 動画をトリミング
             success = crop_video_with_ffmpeg(
                 file_path, save_path,
                 self.crop_rect.x(), self.crop_rect.y(),
                 self.crop_rect.width(), self.crop_rect.height(),
                 use_gpu=self.use_gpu,
-                progress_callback=progress_callback
+                progress_callback=progress_callback,
+                cancel_check=cancel_check
             )
 
             if success:
@@ -1487,14 +1537,29 @@ class BatchImageCropper(QMainWindow):
             self.video_progress.close()
 
         total_saved = video_saved_count + image_saved_count
-        if total_saved > 0:
+        was_cancelled = hasattr(self, 'video_thread') and self.video_thread._is_cancelled
+
+        if was_cancelled:
+            # キャンセルされた場合
+            if total_saved > 0:
+                QMessageBox.information(
+                    self,
+                    "キャンセルされました",
+                    f"処理をキャンセルしました。\n\n{total_saved}個のファイルは正常に保存されました。\n"
+                    f"（画像: {image_saved_count}、動画: {video_saved_count}）"
+                )
+            else:
+                QMessageBox.information(self, "キャンセルされました", "処理をキャンセルしました。")
+        elif total_saved > 0:
+            # 正常完了
             QMessageBox.information(
                 self,
                 "完了",
                 f"{total_saved}個のファイルを切り抜いて保存しました。\n"
                 f"（画像: {image_saved_count}、動画: {video_saved_count}）"
             )
-        elif hasattr(self, 'video_thread') and not self.video_thread._is_cancelled:
+        else:
+            # 失敗
             QMessageBox.warning(self, "警告", "ファイルの保存に失敗しました。")
     
     def remove_selected_images(self):
