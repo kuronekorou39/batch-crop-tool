@@ -458,10 +458,10 @@ class ImageViewer(QLabel):
 
         # 切り抜き矩形をスケール変換
         scaled_rect = QRect(
-            int(self.crop_rect.x() * self.scale_factor),
-            int(self.crop_rect.y() * self.scale_factor),
-            int(self.crop_rect.width() * self.scale_factor),
-            int(self.crop_rect.height() * self.scale_factor)
+            round(self.crop_rect.x() * self.scale_factor),
+            round(self.crop_rect.y() * self.scale_factor),
+            round(self.crop_rect.width() * self.scale_factor),
+            round(self.crop_rect.height() * self.scale_factor)
         )
 
         # オフセットを適用
@@ -647,8 +647,9 @@ class ImageViewer(QLabel):
 
         # 新規選択中
         if self.is_selecting:
-            current_pos.setX(max(0, min(current_pos.x(), image_rect.width())))
-            current_pos.setY(max(0, min(current_pos.y(), image_rect.height())))
+            # 座標の最大値は width-1, height-1 (ピクセルは0から始まる)
+            current_pos.setX(max(0, min(current_pos.x(), image_rect.width() - 1)))
+            current_pos.setY(max(0, min(current_pos.y(), image_rect.height() - 1)))
 
             scaled_rect = QRect(self.selection_start, current_pos).normalized()
 
@@ -661,10 +662,10 @@ class ImageViewer(QLabel):
                 # より大きく変化した方向に合わせる
                 if abs(current_pos.x() - self.selection_start.x()) / self.aspect_ratio > abs(current_pos.y() - self.selection_start.y()):
                     # 幅基準
-                    height = int(width / self.aspect_ratio)
+                    height = round(width / self.aspect_ratio)
                 else:
                     # 高さ基準
-                    width = int(height * self.aspect_ratio)
+                    width = round(height * self.aspect_ratio)
 
                 # 矩形を再構築（開始点と符号を維持）
                 if current_pos.x() >= self.selection_start.x():
@@ -677,14 +678,27 @@ class ImageViewer(QLabel):
                 else:
                     y = self.selection_start.y() - height
 
+                # 画像範囲内に収める
+                x = max(0, min(x, image_rect.width() - width))
+                y = max(0, min(y, image_rect.height() - height))
+                width = min(width, image_rect.width() - x)
+                height = min(height, image_rect.height() - y)
+
                 scaled_rect = QRect(x, y, width, height)
 
-            self.crop_rect = QRect(
-                int(scaled_rect.x() / self.scale_factor),
-                int(scaled_rect.y() / self.scale_factor),
-                int(scaled_rect.width() / self.scale_factor),
-                int(scaled_rect.height() / self.scale_factor)
-            )
+            # 元画像の座標系に変換（範囲チェック付き）
+            crop_x = round(scaled_rect.x() / self.scale_factor)
+            crop_y = round(scaled_rect.y() / self.scale_factor)
+            crop_w = round(scaled_rect.width() / self.scale_factor)
+            crop_h = round(scaled_rect.height() / self.scale_factor)
+
+            # 元画像の範囲内に収める
+            crop_x = max(0, min(crop_x, self.original_pixmap.width() - 1))
+            crop_y = max(0, min(crop_y, self.original_pixmap.height() - 1))
+            crop_w = min(crop_w, self.original_pixmap.width() - crop_x)
+            crop_h = min(crop_h, self.original_pixmap.height() - crop_y)
+
+            self.crop_rect = QRect(crop_x, crop_y, crop_w, crop_h)
 
             self.update()  # Pixmapコピーなしで再描画
             self.cropChanging.emit(self.crop_rect)  # リアルタイム通知
@@ -780,14 +794,15 @@ class ImageViewer(QLabel):
                 bottom = round(bottom)
 
                 # 矩形が反転しないように制限（最小サイズ10ピクセル）
-                if right - left > 10 and bottom - top > 10:
+                # QRect.right() = x + width - 1 なので、width = right - left + 1
+                if right - left + 1 > 10 and bottom - top + 1 > 10:
                     # 画像境界内に制限
                     left = max(0, left)
                     top = max(0, top)
-                    right = min(self.original_pixmap.width(), right)
-                    bottom = min(self.original_pixmap.height(), bottom)
+                    right = min(self.original_pixmap.width() - 1, right)
+                    bottom = min(self.original_pixmap.height() - 1, bottom)
 
-                    new_rect = QRect(int(left), int(top), int(right - left), int(bottom - top))
+                    new_rect = QRect(int(left), int(top), int(right - left + 1), int(bottom - top + 1))
                     if new_rect != self.crop_rect:
                         self.crop_rect = new_rect
                         self.update()  # Pixmapコピーなしで再描画
