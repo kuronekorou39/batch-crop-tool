@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import sys
 import os
+import subprocess
+import tempfile
+import re
+import threading
 from pathlib import Path
 from typing import List, Optional, Tuple
 from PySide6.QtWidgets import (
@@ -9,8 +13,239 @@ from PySide6.QtWidgets import (
     QSplitter, QMessageBox, QSpinBox, QGroupBox, QListWidgetItem,
     QCheckBox, QProgressDialog, QMenu, QAbstractItemView, QComboBox
 )
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF, QTimer
+from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF, QTimer, QThread
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QBrush, QCursor
+import cv2
+import numpy as np
+
+
+def is_video_file(file_path: str) -> bool:
+    """ファイルが動画かどうかを判定"""
+    video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v'}
+    return Path(file_path).suffix.lower() in video_extensions
+
+
+def is_image_file(file_path: str) -> bool:
+    """ファイルが画像かどうかを判定"""
+    image_extensions = {'.png', '.jpg', '.jpeg', '.bmp', '.gif'}
+    return Path(file_path).suffix.lower() in image_extensions
+
+
+def extract_first_frame(video_path: str) -> Optional[QImage]:
+    """動画から最初のフレームを抽出してQImageとして返す"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            return None
+
+        # BGR -> RGB変換
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        height, width, channel = frame_rgb.shape
+        bytes_per_line = channel * width
+
+        # QImageに変換
+        q_image = QImage(frame_rgb.data, width, height, bytes_per_line, QImage.Format.Format_RGB888)
+        return q_image.copy()  # データのコピーを返す
+    except Exception as e:
+        print(f"Error extracting frame from {video_path}: {e}")
+        return None
+
+
+def get_video_info(video_path: str) -> Optional[Tuple[int, int]]:
+    """動画のサイズ（幅、高さ）を取得"""
+    try:
+        cap = cv2.VideoCapture(video_path)
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        cap.release()
+        return (width, height)
+    except Exception as e:
+        print(f"Error getting video info from {video_path}: {e}")
+        return None
+
+
+def check_ffmpeg_available() -> bool:
+    """ffmpegが利用可能かチェック"""
+    try:
+        subprocess.run(['ffmpeg', '-version'], capture_output=True, check=True)
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def check_nvenc_available() -> bool:
+    """NVENCエンコーダー（GPU）が使えるか確認"""
+    try:
+        result = subprocess.run(
+            ['ffmpeg', '-hide_banner', '-encoders'],
+            capture_output=True,
+            text=True
+        )
+        # h264_nvenc または hevc_nvenc が利用可能かチェック
+        return 'h264_nvenc' in result.stdout or 'hevc_nvenc' in result.stdout
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+
+
+def get_video_duration(file_path: str) -> float:
+    """動画の長さ（秒）を取得"""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            file_path
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        return float(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError, ValueError):
+        return 0.0
+
+
+def crop_video_with_ffmpeg(input_path: str, output_path: str, x: int, y: int, width: int, height: int,
+                           use_gpu: bool = False, progress_callback=None) -> bool:
+    """ffmpegを使用して動画をトリミング
+
+    Args:
+        input_path: 入力動画のパス
+        output_path: 出力動画のパス
+        x, y, width, height: トリミング範囲
+        use_gpu: GPU（NVENC）エンコードを使用するか
+        progress_callback: 進捗コールバック関数 (percent: float) -> None
+    """
+    try:
+        # 動画の長さを取得
+        duration = get_video_duration(input_path)
+
+        cmd = [
+            'ffmpeg',
+            '-i', input_path,
+            '-vf', f'crop={width}:{height}:{x}:{y}',
+        ]
+
+        # GPUエンコードが利用可能かつ指定されている場合
+        if use_gpu:
+            # NVENCのパラメータを最適化
+            cmd.extend([
+                '-c:v', 'h264_nvenc',
+                '-preset', 'medium',  # slow, medium, fast, hp, hq, bd, ll, llhq, llhp, lossless
+                '-cq', '23',  # 品質（0-51、低いほど高品質）
+                '-b:v', '0'   # VBRモード
+            ])
+        else:
+            # CPU エンコード（デフォルト）
+            pass
+
+        cmd.extend([
+            '-c:a', 'copy',  # 音声はそのままコピー
+            '-y',  # 上書き確認なし
+            output_path
+        ])
+
+        # プロセスを開始
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            universal_newlines=True
+        )
+
+        # 進捗を監視（stderrから読み取る）
+        if progress_callback and duration > 0:
+            def read_stderr():
+                for line in process.stderr:
+                    # ffmpegはstderrに進捗情報を出力
+                    if 'time=' in line:
+                        try:
+                            # time=00:01:23.45 の形式から秒数を抽出
+                            time_match = re.search(r'time=(\d+):(\d+):(\d+\.\d+)', line)
+                            if time_match:
+                                hours = int(time_match.group(1))
+                                minutes = int(time_match.group(2))
+                                seconds = float(time_match.group(3))
+                                current_time = hours * 3600 + minutes * 60 + seconds
+                                percent = min(100.0, (current_time / duration) * 100.0)
+                                progress_callback(percent)
+                        except (ValueError, AttributeError):
+                            pass
+
+            stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+            stderr_thread.start()
+
+            process.wait()
+            stderr_thread.join(timeout=1)
+        else:
+            # コールバックがない場合は単純に待機
+            process.wait()
+
+        return process.returncode == 0
+    except Exception as e:
+        print(f"エラー: 動画のトリミング中に問題が発生しました: {e}")
+        return False
+
+
+class VideoProcessorThread(QThread):
+    """動画処理を別スレッドで実行するクラス"""
+    progress_updated = Signal(int, float)  # (file_index, percent)
+    file_completed = Signal(int, bool)  # (file_index, success)
+    all_completed = Signal(int)  # (saved_count)
+
+    def __init__(self, files_to_process, crop_rect, output_folder, use_gpu=False):
+        super().__init__()
+        self.files_to_process = files_to_process
+        self.crop_rect = crop_rect
+        self.output_folder = output_folder
+        self.use_gpu = use_gpu
+        self._is_cancelled = False
+
+    def cancel(self):
+        """処理をキャンセル"""
+        self._is_cancelled = True
+
+    def run(self):
+        """スレッドのメイン処理"""
+        saved_count = 0
+
+        for i, file_path in enumerate(self.files_to_process):
+            if self._is_cancelled:
+                break
+
+            filename = os.path.basename(file_path)
+            name, ext = os.path.splitext(filename)
+            save_path = os.path.join(self.output_folder, f"{name}_cropped{ext}")
+
+            # 既存ファイルがあれば連番を付ける
+            counter = 1
+            while os.path.exists(save_path):
+                save_path = os.path.join(self.output_folder, f"{name}_cropped_{counter}{ext}")
+                counter += 1
+
+            # 進捗コールバック
+            def progress_callback(percent):
+                if not self._is_cancelled:
+                    self.progress_updated.emit(i, percent)
+
+            # 動画をトリミング
+            success = crop_video_with_ffmpeg(
+                file_path, save_path,
+                self.crop_rect.x(), self.crop_rect.y(),
+                self.crop_rect.width(), self.crop_rect.height(),
+                use_gpu=self.use_gpu,
+                progress_callback=progress_callback
+            )
+
+            if success:
+                saved_count += 1
+
+            self.file_completed.emit(i, success)
+
+        self.all_completed.emit(saved_count)
 
 
 class ImageViewer(QLabel):
@@ -629,14 +864,23 @@ class BatchImageCropper(QMainWindow):
         super().__init__()
         self.image_files: List[str] = []
         self.image_sizes = {}  # {file_path: (width, height)}
+        self.file_types = {}  # {file_path: 'image' or 'video'}
         self.current_index = -1
         self.crop_rect = QRect()
 
         self.setup_ui()
         self.setAcceptDrops(True)  # ドラッグ&ドロップを有効化
+
+        # ffmpegの可用性をチェック
+        if not check_ffmpeg_available():
+            QMessageBox.warning(
+                self,
+                "警告",
+                "ffmpegが見つかりません。\n動画のトリミング機能を使用するには、ffmpegをインストールしてください。\n\n画像のトリミングは通常通り使用できます。"
+            )
     
     def setup_ui(self):
-        self.setWindowTitle("バッチ画像切り抜きツール")
+        self.setWindowTitle("バッチ切り抜きツール（画像・動画対応）")
         self.setGeometry(100, 100, 1200, 800)
         
         central_widget = QWidget()
@@ -649,19 +893,19 @@ class BatchImageCropper(QMainWindow):
         file_group = QGroupBox("ファイル管理")
         file_layout = QVBoxLayout()
 
-        # 画像を追加ボタン
-        load_btn = QPushButton("画像を追加...")
+        # ファイルを追加ボタン
+        load_btn = QPushButton("ファイルを追加...")
         load_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogOpenButton))
         load_btn.setMinimumHeight(40)
-        load_btn.setToolTip("切り抜きたい画像ファイルを選択します\n(PNG, JPG, BMP, GIF対応)")
+        load_btn.setToolTip("切り抜きたい画像・動画ファイルを選択します\n(画像: PNG, JPG, BMP, GIF / 動画: MP4, AVI, MOV, MKV等)")
         load_btn.clicked.connect(self.load_images)
         file_layout.addWidget(load_btn)
 
-        # 選択した画像を削除ボタン
-        remove_btn = QPushButton("選択した画像を削除")
+        # 選択したファイルを削除ボタン
+        remove_btn = QPushButton("選択したファイルを削除")
         remove_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogDiscardButton))
         remove_btn.setMinimumHeight(40)
-        remove_btn.setToolTip("リストで選択中の画像を削除します\n(Ctrl/Shiftキーで複数選択可能)")
+        remove_btn.setToolTip("リストで選択中のファイルを削除します\n(Ctrl/Shiftキーで複数選択可能)")
         remove_btn.clicked.connect(self.remove_selected_images)
         file_layout.addWidget(remove_btn)
 
@@ -669,14 +913,14 @@ class BatchImageCropper(QMainWindow):
         clear_btn = QPushButton("リストをクリア")
         clear_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogResetButton))
         clear_btn.setMinimumHeight(40)
-        clear_btn.setToolTip("すべての画像をリストから削除します")
+        clear_btn.setToolTip("すべてのファイルをリストから削除します")
         clear_btn.clicked.connect(self.clear_list)
         file_layout.addWidget(clear_btn)
 
         file_group.setLayout(file_layout)
         left_layout.addWidget(file_group)
-        
-        list_group = QGroupBox("画像リスト")
+
+        list_group = QGroupBox("ファイルリスト")
         list_layout = QVBoxLayout()
 
         self.file_list = QListWidget()
@@ -686,8 +930,8 @@ class BatchImageCropper(QMainWindow):
         self.file_list.customContextMenuRequested.connect(self.show_context_menu)
         list_layout.addWidget(self.file_list)
 
-        # 表示情報（画像サイズとズーム）
-        self.size_info_label = QLabel("画像サイズ: -")
+        # 表示情報（サイズとズーム）
+        self.size_info_label = QLabel("サイズ: -")
         self.size_info_label.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
         list_layout.addWidget(self.size_info_label)
 
@@ -789,7 +1033,7 @@ class BatchImageCropper(QMainWindow):
         self.crop_and_save_btn = QPushButton("切り抜いて保存...")
         self.crop_and_save_btn.setIcon(self.style().standardIcon(self.style().StandardPixmap.SP_DialogSaveButton))
         self.crop_and_save_btn.setMinimumHeight(50)
-        self.crop_and_save_btn.setToolTip("設定した範囲で画像を切り抜き、\n保存先フォルダに保存します")
+        self.crop_and_save_btn.setToolTip("設定した範囲で切り抜き、\n保存先フォルダに保存します")
         self.crop_and_save_btn.clicked.connect(self.crop_and_save_images)
         self.crop_and_save_btn.setEnabled(False)
 
@@ -835,18 +1079,19 @@ class BatchImageCropper(QMainWindow):
     def load_images(self):
         files, _ = QFileDialog.getOpenFileNames(
             self,
-            "画像ファイルを選択",
+            "画像・動画ファイルを選択",
             "",
-            "Image Files (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*)"
+            "Media Files (*.png *.jpg *.jpeg *.bmp *.gif *.mp4 *.avi *.mov *.mkv *.wmv);;Image Files (*.png *.jpg *.jpeg *.bmp *.gif);;Video Files (*.mp4 *.avi *.mov *.mkv *.wmv);;All Files (*)"
         )
-        
+
         if files:
-            self.add_image_files(files)
+            self.add_media_files(files)
     
     def clear_list(self):
         self.file_list.clear()
         self.image_files.clear()
         self.image_sizes.clear()
+        self.file_types.clear()
         self.current_index = -1
         # 画像ビューアを適切にクリア
         self.image_viewer.original_pixmap = None
@@ -856,7 +1101,7 @@ class BatchImageCropper(QMainWindow):
         self.crop_rect = QRect()
         self.update_crop_info()
         self.crop_and_save_btn.setEnabled(False)
-        self.size_info_label.setText("画像サイズ: -")
+        self.size_info_label.setText("ファイルサイズ: -")
         self.zoom_info_label.setText("ズーム: 100%")
     
     def on_image_selected(self, item):
@@ -866,15 +1111,36 @@ class BatchImageCropper(QMainWindow):
         file_path = item.data(Qt.ItemDataRole.UserRole)
         self.current_index = self.file_list.row(item)
 
-        if self.image_viewer.set_image(file_path):
+        # 動画ファイルの場合はフレームを抽出
+        if is_video_file(file_path):
+            q_image = extract_first_frame(file_path)
+            if q_image:
+                pixmap = QPixmap.fromImage(q_image)
+                self.image_viewer.original_pixmap = pixmap
+                self.image_viewer.user_zoomed = False
+                self.image_viewer.fit_to_window()
+                QTimer.singleShot(0, self.image_viewer.center_image)
+
+                if file_path in self.image_sizes:
+                    size = self.image_sizes[file_path]
+                    file_type = self.file_types.get(file_path, 'unknown')
+                    type_label = "動画" if file_type == 'video' else "画像"
+                    self.size_info_label.setText(f"{type_label}サイズ: {size[0]}x{size[1]}")
+
+                    self.update_spin_ranges()
+                    self.update_list_item_styles()
+
+                if not self.crop_rect.isEmpty():
+                    self.image_viewer.set_crop_rect(self.crop_rect)
+        # 画像ファイルの場合は従来通り
+        elif self.image_viewer.set_image(file_path):
             if file_path in self.image_sizes:
                 size = self.image_sizes[file_path]
-                self.size_info_label.setText(f"画像サイズ: {size[0]}x{size[1]}")
+                file_type = self.file_types.get(file_path, 'image')
+                type_label = "動画" if file_type == 'video' else "画像"
+                self.size_info_label.setText(f"{type_label}サイズ: {size[0]}x{size[1]}")
 
-                # スピンボックスの最大値を画像サイズに設定
                 self.update_spin_ranges()
-
-                # リスト表示を更新（処理対象かどうかを視覚化）
                 self.update_list_item_styles()
 
             if not self.crop_rect.isEmpty():
@@ -924,7 +1190,7 @@ class BatchImageCropper(QMainWindow):
         # ボタンのツールチップを更新
         if same_size_count > 0:
             self.crop_and_save_btn.setToolTip(
-                f"設定した範囲で画像を切り抜き、\n保存先フォルダに保存します\n\n処理対象: {same_size_count}枚"
+                f"設定した範囲で切り抜き、\n保存先フォルダに保存します\n\n処理対象: {same_size_count}ファイル"
             )
 
     def update_spin_ranges(self):
@@ -1093,7 +1359,7 @@ class BatchImageCropper(QMainWindow):
             return
 
         if not self.image_files:
-            QMessageBox.warning(self, "警告", "画像が読み込まれていません。")
+            QMessageBox.warning(self, "警告", "ファイルが読み込まれていません。")
             return
 
         # 最初に保存先フォルダを選択
@@ -1101,47 +1367,135 @@ class BatchImageCropper(QMainWindow):
         if not folder:
             return
 
-        # 現在選択中の画像と同じサイズの画像すべてを対象にする
+        # 現在選択中のファイルと同じサイズのファイルすべてを対象にする
         current_file = self.image_files[self.current_index]
         current_size = self.image_sizes.get(current_file)
         files_to_crop = [f for f in self.image_files if self.image_sizes.get(f) == current_size]
 
-        progress = QProgressDialog("画像を処理中...", "キャンセル", 0, len(files_to_crop), self)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        # 画像と動画を分ける
+        image_files = [f for f in files_to_crop if self.file_types.get(f) == 'image']
+        video_files = [f for f in files_to_crop if self.file_types.get(f) == 'video']
 
+        # 動画ファイルが含まれている場合、ffmpegの確認
+        if video_files and not check_ffmpeg_available():
+            QMessageBox.warning(
+                self,
+                "エラー",
+                "動画ファイルが含まれていますが、ffmpegが見つかりません。\n\nffmpegをインストールしてください。\n画像ファイルのみ処理を続行しますか？"
+            )
+            video_files = []
+            if not image_files:
+                return
+
+        # GPU（NVENC）が使えるかチェック
+        use_gpu = False
+        if video_files:
+            use_gpu = check_nvenc_available()
+            if use_gpu:
+                gpu_msg = QMessageBox(self)
+                gpu_msg.setIcon(QMessageBox.Icon.Information)
+                gpu_msg.setWindowTitle("GPU加速")
+                gpu_msg.setText("NVIDIA GPU（NVENC）が検出されました。\n\nGPUを使って動画エンコードを高速化しますか？\n（推奨：はい）")
+                gpu_msg.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                gpu_msg.setDefaultButton(QMessageBox.StandardButton.Yes)
+                use_gpu = gpu_msg.exec() == QMessageBox.StandardButton.Yes
+
+        # 画像ファイルを先に処理（高速なので）
         saved_count = 0
+        if image_files:
+            progress = QProgressDialog("画像ファイルを処理中...", "キャンセル", 0, len(image_files), self)
+            progress.setWindowModality(Qt.WindowModality.WindowModal)
 
-        for i, file_path in enumerate(files_to_crop):
-            if progress.wasCanceled():
-                break
+            for i, file_path in enumerate(image_files):
+                if progress.wasCanceled():
+                    break
 
-            progress.setValue(i)
-            filename = os.path.basename(file_path)
-            progress.setLabelText(f"処理中: {filename}")
+                progress.setValue(i)
+                filename = os.path.basename(file_path)
+                progress.setLabelText(f"処理中: {filename}")
 
-            image = QImage(file_path)
-            if not image.isNull():
-                # 絶対座標で切り抜き
-                cropped = image.copy(self.crop_rect)
+                image = QImage(file_path)
+                if not image.isNull():
+                    cropped = image.copy(self.crop_rect)
+                    name, ext = os.path.splitext(filename)
+                    save_path = os.path.join(folder, f"{name}_cropped{ext}")
 
-                # 保存処理
-                name, ext = os.path.splitext(filename)
-                save_path = os.path.join(folder, f"{name}_cropped{ext}")
+                    counter = 1
+                    while os.path.exists(save_path):
+                        save_path = os.path.join(folder, f"{name}_cropped_{counter}{ext}")
+                        counter += 1
 
-                counter = 1
-                while os.path.exists(save_path):
-                    save_path = os.path.join(folder, f"{name}_cropped_{counter}{ext}")
-                    counter += 1
+                    if cropped.save(save_path):
+                        saved_count += 1
 
-                if cropped.save(save_path):
-                    saved_count += 1
+            progress.setValue(len(image_files))
 
-        progress.setValue(len(files_to_crop))
+        # 動画ファイルを別スレッドで処理
+        if video_files:
+            self.video_progress = QProgressDialog(
+                "動画ファイルを処理中...",
+                "キャンセル",
+                0,
+                100 * len(video_files),
+                self
+            )
+            self.video_progress.setWindowModality(Qt.WindowModality.WindowModal)
+            self.video_progress.setMinimumDuration(0)
+            self.video_progress.setValue(0)
 
-        if saved_count > 0:
-            QMessageBox.information(self, "完了", f"{saved_count}枚の画像を切り抜いて保存しました。")
-        elif not progress.wasCanceled():
-            QMessageBox.warning(self, "警告", "画像の保存に失敗しました。")
+            # スレッドを作成して開始
+            self.video_thread = VideoProcessorThread(
+                video_files,
+                self.crop_rect,
+                folder,
+                use_gpu=use_gpu
+            )
+
+            # シグナルを接続
+            self.video_thread.progress_updated.connect(self.on_video_progress_updated)
+            self.video_thread.file_completed.connect(self.on_video_file_completed)
+            self.video_thread.all_completed.connect(
+                lambda count: self.on_all_videos_completed(count, saved_count)
+            )
+            self.video_progress.canceled.connect(self.video_thread.cancel)
+
+            self.video_thread.start()
+        else:
+            # 動画がない場合は完了メッセージを表示
+            if saved_count > 0:
+                QMessageBox.information(self, "完了", f"{saved_count}個のファイルを切り抜いて保存しました。")
+
+    def on_video_progress_updated(self, file_index: int, percent: float):
+        """動画処理の進捗更新"""
+        if hasattr(self, 'video_progress'):
+            total_percent = file_index * 100 + int(percent)
+            self.video_progress.setValue(total_percent)
+
+            if hasattr(self, 'video_thread') and self.video_thread:
+                filename = os.path.basename(self.video_thread.files_to_process[file_index])
+                self.video_progress.setLabelText(
+                    f"処理中: {filename}\n({file_index + 1}/{len(self.video_thread.files_to_process)}) - {int(percent)}%"
+                )
+
+    def on_video_file_completed(self, file_index: int, success: bool):
+        """動画ファイルの処理完了"""
+        pass  # 必要に応じてログなどを追加
+
+    def on_all_videos_completed(self, video_saved_count: int, image_saved_count: int):
+        """すべての動画処理が完了"""
+        if hasattr(self, 'video_progress'):
+            self.video_progress.close()
+
+        total_saved = video_saved_count + image_saved_count
+        if total_saved > 0:
+            QMessageBox.information(
+                self,
+                "完了",
+                f"{total_saved}個のファイルを切り抜いて保存しました。\n"
+                f"（画像: {image_saved_count}、動画: {video_saved_count}）"
+            )
+        elif hasattr(self, 'video_thread') and not self.video_thread._is_cancelled:
+            QMessageBox.warning(self, "警告", "ファイルの保存に失敗しました。")
     
     def remove_selected_images(self):
         """選択された画像をリストから削除"""
@@ -1176,8 +1530,8 @@ class BatchImageCropper(QMainWindow):
             return
         
         menu = QMenu(self)
-        
-        remove_action = menu.addAction("選択した画像を削除")
+
+        remove_action = menu.addAction("選択したファイルを削除")
         remove_action.triggered.connect(self.remove_selected_images)
         
         menu.addSeparator()
@@ -1190,67 +1544,87 @@ class BatchImageCropper(QMainWindow):
     def dragEnterEvent(self, event):
         """ドラッグされたファイルの検証"""
         if event.mimeData().hasUrls():
-            # 画像ファイルかチェック
+            # 画像・動画ファイルかチェック
             for url in event.mimeData().urls():
                 if url.isLocalFile():
                     file_path = url.toLocalFile()
-                    if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                    if is_image_file(file_path) or is_video_file(file_path):
                         event.acceptProposedAction()
                         return
             event.ignore()
         else:
             event.ignore()
-    
+
     def dropEvent(self, event):
         """ドロップされたファイルを追加"""
         files = []
         for url in event.mimeData().urls():
             if url.isLocalFile():
                 file_path = url.toLocalFile()
-                if file_path.lower().endswith(('.png', '.jpg', '.jpeg', '.bmp', '.gif')):
+                if is_image_file(file_path) or is_video_file(file_path):
                     files.append(file_path)
-        
+
         if files:
-            self.add_image_files(files)
+            self.add_media_files(files)
     
-    def add_image_files(self, files):
-        """画像ファイルをリストに追加（共通処理）"""
+    def add_media_files(self, files):
+        """画像・動画ファイルをリストに追加（共通処理）"""
         size_groups = {}
-        
+
         for file in files:
             if file not in self.image_files:
-                image = QImage(file)
-                if not image.isNull():
-                    size = (image.width(), image.height())
-                    self.image_sizes[file] = size
-                    
+                size = None
+                file_type = None
+
+                # 動画ファイルの場合
+                if is_video_file(file):
+                    size = get_video_info(file)
+                    file_type = 'video'
+                    if size:
+                        self.image_sizes[file] = size
+                        self.file_types[file] = file_type
+                # 画像ファイルの場合
+                elif is_image_file(file):
+                    image = QImage(file)
+                    if not image.isNull():
+                        size = (image.width(), image.height())
+                        file_type = 'image'
+                        self.image_sizes[file] = size
+                        self.file_types[file] = file_type
+
+                if size:
                     size_key = f"{size[0]}x{size[1]}"
                     if size_key not in size_groups:
                         size_groups[size_key] = []
                     size_groups[size_key].append(file)
-                    
+
                     self.image_files.append(file)
-                    item_text = f"{os.path.basename(file)} [{size[0]}x{size[1]}]"
+
+                    # アイコンの表示
+                    type_icon = "🎬" if file_type == 'video' else "🖼️"
+                    item_text = f"{type_icon} {os.path.basename(file)} [{size[0]}x{size[1]}]"
                     item = QListWidgetItem(item_text)
                     item.setData(Qt.ItemDataRole.UserRole, file)
-                    item.setToolTip(f"サイズ: {size[0]}x{size[1]}")
+
+                    type_label = "動画" if file_type == 'video' else "画像"
+                    item.setToolTip(f"{type_label}\nサイズ: {size[0]}x{size[1]}")
 
                     self.file_list.addItem(item)
-        
+
         if len(size_groups) > 1:
-            sizes_text = "\n".join([f"- {size}: {len(files)}枚" for size, files in size_groups.items()])
+            sizes_text = "\n".join([f"- {size}: {len(files)}個" for size, files in size_groups.items()])
             QMessageBox.information(
                 self,
-                "異なるサイズの画像を検出",
-                f"複数の画像サイズが検出されました:\n{sizes_text}\n\n"
-                "切り抜き処理は、選択中の画像と同じサイズの画像のみに適用されます。"
+                "異なるサイズのファイルを検出",
+                f"複数のファイルサイズが検出されました:\n{sizes_text}\n\n"
+                "切り抜き処理は、選択中のファイルと同じサイズのファイルのみに適用されます。"
             )
-        
+
         if self.current_index == -1 and self.image_files:
             self.file_list.setCurrentRow(0)
             self.on_image_selected(self.file_list.item(0))
         elif self.current_index >= 0:
-            # 既に画像が選択されている場合もリストのスタイルを更新
+            # 既にファイルが選択されている場合もリストのスタイルを更新
             self.update_list_item_styles()
     
 
