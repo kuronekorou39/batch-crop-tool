@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QPushButton, QFileDialog, QListWidget, QLabel, QScrollArea,
     QSplitter, QMessageBox, QSpinBox, QGroupBox, QListWidgetItem,
-    QCheckBox, QProgressDialog, QMenu, QAbstractItemView
+    QCheckBox, QProgressDialog, QMenu, QAbstractItemView, QComboBox
 )
 from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize, QRectF, QPointF, QTimer
 from PySide6.QtGui import QPixmap, QPainter, QPen, QColor, QImage, QBrush, QCursor
@@ -47,6 +47,10 @@ class ImageViewer(QLabel):
         self.pan_start_pos = QPoint()
         self.scroll_start_x = 0
         self.scroll_start_y = 0
+
+        # アスペクト比固定
+        self.aspect_ratio_locked = False
+        self.aspect_ratio = 1.0  # width / height
         
     def set_image(self, image_path: str):
         self.original_pixmap = QPixmap(image_path)
@@ -324,6 +328,33 @@ class ImageViewer(QLabel):
 
             scaled_rect = QRect(self.selection_start, current_pos).normalized()
 
+            # アスペクト比固定の場合は調整
+            if self.aspect_ratio_locked and scaled_rect.width() > 0 and scaled_rect.height() > 0:
+                # 開始点を固定し、現在の位置に基づいて比率を維持
+                width = scaled_rect.width()
+                height = scaled_rect.height()
+
+                # より大きく変化した方向に合わせる
+                if abs(current_pos.x() - self.selection_start.x()) / self.aspect_ratio > abs(current_pos.y() - self.selection_start.y()):
+                    # 幅基準
+                    height = int(width / self.aspect_ratio)
+                else:
+                    # 高さ基準
+                    width = int(height * self.aspect_ratio)
+
+                # 矩形を再構築（開始点と符号を維持）
+                if current_pos.x() >= self.selection_start.x():
+                    x = self.selection_start.x()
+                else:
+                    x = self.selection_start.x() - width
+
+                if current_pos.y() >= self.selection_start.y():
+                    y = self.selection_start.y()
+                else:
+                    y = self.selection_start.y() - height
+
+                scaled_rect = QRect(x, y, width, height)
+
             self.crop_rect = QRect(
                 int(scaled_rect.x() / self.scale_factor),
                 int(scaled_rect.y() / self.scale_factor),
@@ -372,19 +403,43 @@ class ImageViewer(QLabel):
                 right = float(self.drag_start_rect.right())
                 bottom = float(self.drag_start_rect.bottom())
 
+                # アスペクト比固定時は辺のハンドルでのリサイズを無効化
+                if self.aspect_ratio_locked and self.drag_mode in ['resize_t', 'resize_b', 'resize_l', 'resize_r']:
+                    return
+
                 # 各ハンドルに応じて適切な辺だけを変更
                 if self.drag_mode == 'resize_tl':
                     left = self.drag_start_rect.left() + delta_unscaled.x()
                     top = self.drag_start_rect.top() + delta_unscaled.y()
+                    # アスペクト比固定
+                    if self.aspect_ratio_locked:
+                        width = right - left
+                        height = width / self.aspect_ratio
+                        top = bottom - height
                 elif self.drag_mode == 'resize_tr':
                     right = self.drag_start_rect.right() + delta_unscaled.x()
                     top = self.drag_start_rect.top() + delta_unscaled.y()
+                    # アスペクト比固定
+                    if self.aspect_ratio_locked:
+                        width = right - left
+                        height = width / self.aspect_ratio
+                        top = bottom - height
                 elif self.drag_mode == 'resize_bl':
                     left = self.drag_start_rect.left() + delta_unscaled.x()
                     bottom = self.drag_start_rect.bottom() + delta_unscaled.y()
+                    # アスペクト比固定
+                    if self.aspect_ratio_locked:
+                        width = right - left
+                        height = width / self.aspect_ratio
+                        bottom = top + height
                 elif self.drag_mode == 'resize_br':
                     right = self.drag_start_rect.right() + delta_unscaled.x()
                     bottom = self.drag_start_rect.bottom() + delta_unscaled.y()
+                    # アスペクト比固定
+                    if self.aspect_ratio_locked:
+                        width = right - left
+                        height = width / self.aspect_ratio
+                        bottom = top + height
                 elif self.drag_mode == 'resize_t':
                     top = self.drag_start_rect.top() + delta_unscaled.y()
                 elif self.drag_mode == 'resize_b':
@@ -524,6 +579,11 @@ class ImageViewer(QLabel):
         self.crop_rect = rect
         self.update()  # Pixmapコピーなしで再描画
 
+    def set_aspect_ratio(self, locked: bool, ratio: float = 1.0):
+        """アスペクト比を設定"""
+        self.aspect_ratio_locked = locked
+        self.aspect_ratio = ratio
+
     def get_scroll_area(self):
         """親のQScrollAreaを取得"""
         parent = self.parent()
@@ -571,9 +631,7 @@ class BatchImageCropper(QMainWindow):
         self.image_sizes = {}  # {file_path: (width, height)}
         self.current_index = -1
         self.crop_rect = QRect()
-        self.base_image_size = None  # 基準画像のサイズ
-        self.crop_mode = "absolute"  # "absolute" or "proportional"
-        
+
         self.setup_ui()
         self.setAcceptDrops(True)  # ドラッグ&ドロップを有効化
     
@@ -620,70 +678,106 @@ class BatchImageCropper(QMainWindow):
         
         list_group = QGroupBox("画像リスト")
         list_layout = QVBoxLayout()
-        
+
         self.file_list = QListWidget()
         self.file_list.itemClicked.connect(self.on_image_selected)
         self.file_list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.file_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.file_list.customContextMenuRequested.connect(self.show_context_menu)
         list_layout.addWidget(self.file_list)
-        
+
+        # 表示情報（画像サイズとズーム）
+        self.size_info_label = QLabel("画像サイズ: -")
+        self.size_info_label.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
+        list_layout.addWidget(self.size_info_label)
+
+        self.zoom_info_label = QLabel("ズーム: 100%")
+        self.zoom_info_label.setStyleSheet("QLabel { color: #666; font-size: 11px; }")
+        list_layout.addWidget(self.zoom_info_label)
+
         list_group.setLayout(list_layout)
         left_layout.addWidget(list_group)
         
         crop_group = QGroupBox("切り抜き設定")
         crop_layout = QVBoxLayout()
-        
+
         self.crop_info_label = QLabel("切り抜き範囲: 未設定")
         crop_layout.addWidget(self.crop_info_label)
-        
-        coord_layout = QHBoxLayout()
-        coord_layout.addWidget(QLabel("X:"))
+
+        # X, Y 座標
+        xy_layout = QHBoxLayout()
+        xy_layout.addWidget(QLabel("X:"))
         self.x_spin = QSpinBox()
         self.x_spin.setRange(0, 9999)
+        self.x_spin.setToolTip("切り抜き範囲の左上X座標")
         self.x_spin.valueChanged.connect(self.on_manual_crop_changed)
-        coord_layout.addWidget(self.x_spin)
-        
-        coord_layout.addWidget(QLabel("Y:"))
+        xy_layout.addWidget(self.x_spin)
+
+        xy_layout.addWidget(QLabel("Y:"))
         self.y_spin = QSpinBox()
         self.y_spin.setRange(0, 9999)
+        self.y_spin.setToolTip("切り抜き範囲の左上Y座標")
         self.y_spin.valueChanged.connect(self.on_manual_crop_changed)
-        coord_layout.addWidget(self.y_spin)
-        
-        coord_layout.addWidget(QLabel("幅:"))
+        xy_layout.addWidget(self.y_spin)
+
+        crop_layout.addLayout(xy_layout)
+
+        # 幅、高さ
+        wh_layout = QHBoxLayout()
+        wh_layout.addWidget(QLabel("幅:"))
         self.width_spin = QSpinBox()
         self.width_spin.setRange(0, 9999)
+        self.width_spin.setToolTip("切り抜き範囲の幅")
         self.width_spin.valueChanged.connect(self.on_manual_crop_changed)
-        coord_layout.addWidget(self.width_spin)
-        
-        coord_layout.addWidget(QLabel("高さ:"))
+        wh_layout.addWidget(self.width_spin)
+
+        wh_layout.addWidget(QLabel("高さ:"))
         self.height_spin = QSpinBox()
         self.height_spin.setRange(0, 9999)
+        self.height_spin.setToolTip("切り抜き範囲の高さ")
         self.height_spin.valueChanged.connect(self.on_manual_crop_changed)
-        coord_layout.addWidget(self.height_spin)
-        
-        crop_layout.addLayout(coord_layout)
-        
-        mode_layout = QHBoxLayout()
-        self.absolute_radio = QCheckBox("絶対座標で切り抜き")
-        self.absolute_radio.setChecked(True)
-        self.absolute_radio.toggled.connect(self.on_mode_changed)
-        mode_layout.addWidget(self.absolute_radio)
-        
-        self.proportional_radio = QCheckBox("比率で切り抜き")
-        self.proportional_radio.toggled.connect(self.on_mode_changed)
-        mode_layout.addWidget(self.proportional_radio)
-        crop_layout.addLayout(mode_layout)
-        
-        self.apply_to_all_checkbox = QCheckBox("同じサイズの画像に適用")
-        self.apply_to_all_checkbox.setChecked(True)
-        crop_layout.addWidget(self.apply_to_all_checkbox)
-        
-        self.size_info_label = QLabel("画像サイズ: -")
-        crop_layout.addWidget(self.size_info_label)
+        wh_layout.addWidget(self.height_spin)
 
-        self.zoom_info_label = QLabel("ズーム: 100%")
-        crop_layout.addWidget(self.zoom_info_label)
+        crop_layout.addLayout(wh_layout)
+
+        # アスペクト比固定
+        aspect_layout = QHBoxLayout()
+        self.aspect_ratio_checkbox = QCheckBox("アスペクト比固定")
+        self.aspect_ratio_checkbox.setToolTip("切り抜き矩形の縦横比を固定します")
+        self.aspect_ratio_checkbox.toggled.connect(self.on_aspect_ratio_toggled)
+        aspect_layout.addWidget(self.aspect_ratio_checkbox)
+
+        self.aspect_ratio_combo = QComboBox()
+        self.aspect_ratio_combo.addItems(["1:1 (正方形)", "4:3", "3:2", "16:9", "16:10", "21:9", "カスタム"])
+        self.aspect_ratio_combo.setToolTip("固定する縦横比を選択します")
+        self.aspect_ratio_combo.setEnabled(False)
+        self.aspect_ratio_combo.currentIndexChanged.connect(self.on_aspect_ratio_changed)
+        aspect_layout.addWidget(self.aspect_ratio_combo)
+
+        crop_layout.addLayout(aspect_layout)
+
+        # カスタム比率入力
+        custom_ratio_layout = QHBoxLayout()
+        custom_ratio_layout.addWidget(QLabel("カスタム比率:"))
+        self.custom_width_spin = QSpinBox()
+        self.custom_width_spin.setRange(1, 999)
+        self.custom_width_spin.setValue(16)
+        self.custom_width_spin.setEnabled(False)
+        self.custom_width_spin.setToolTip("カスタム比率の幅")
+        self.custom_width_spin.valueChanged.connect(self.on_custom_ratio_changed)
+        custom_ratio_layout.addWidget(self.custom_width_spin)
+
+        custom_ratio_layout.addWidget(QLabel(":"))
+        self.custom_height_spin = QSpinBox()
+        self.custom_height_spin.setRange(1, 999)
+        self.custom_height_spin.setValue(9)
+        self.custom_height_spin.setEnabled(False)
+        self.custom_height_spin.setToolTip("カスタム比率の高さ")
+        self.custom_height_spin.valueChanged.connect(self.on_custom_ratio_changed)
+        custom_ratio_layout.addWidget(self.custom_height_spin)
+
+        custom_ratio_layout.addStretch()
+        crop_layout.addLayout(custom_ratio_layout)
 
         crop_group.setLayout(crop_layout)
         left_layout.addWidget(crop_group)
@@ -753,7 +847,6 @@ class BatchImageCropper(QMainWindow):
         self.file_list.clear()
         self.image_files.clear()
         self.image_sizes.clear()
-        self.base_image_size = None
         self.current_index = -1
         # 画像ビューアを適切にクリア
         self.image_viewer.original_pixmap = None
@@ -764,28 +857,20 @@ class BatchImageCropper(QMainWindow):
         self.update_crop_info()
         self.crop_and_save_btn.setEnabled(False)
         self.size_info_label.setText("画像サイズ: -")
+        self.zoom_info_label.setText("ズーム: 100%")
     
     def on_image_selected(self, item):
         if not item:
             return
-        
+
         file_path = item.data(Qt.ItemDataRole.UserRole)
         self.current_index = self.file_list.row(item)
-        
+
         if self.image_viewer.set_image(file_path):
             if file_path in self.image_sizes:
                 size = self.image_sizes[file_path]
                 self.size_info_label.setText(f"画像サイズ: {size[0]}x{size[1]}")
-                
-                if not self.base_image_size:
-                    self.base_image_size = size
-                
-                same_size_count = sum(1 for s in self.image_sizes.values() if s == size)
-                if same_size_count > 1:
-                    self.apply_to_all_checkbox.setText(f"同じサイズの画像に適用 ({same_size_count}枚)")
-                else:
-                    self.apply_to_all_checkbox.setText("同じサイズの画像に適用 (この画像のみ)")
-            
+
             if not self.crop_rect.isEmpty():
                 self.image_viewer.set_crop_rect(self.crop_rect)
     
@@ -815,6 +900,52 @@ class BatchImageCropper(QMainWindow):
         zoom_percent = scale_factor * 100
         self.zoom_info_label.setText(f"ズーム: {zoom_percent:.0f}%")
 
+    def on_aspect_ratio_toggled(self, checked: bool):
+        """アスペクト比固定のON/OFF"""
+        self.aspect_ratio_combo.setEnabled(checked)
+        is_custom = self.aspect_ratio_combo.currentText() == "カスタム"
+        self.custom_width_spin.setEnabled(checked and is_custom)
+        self.custom_height_spin.setEnabled(checked and is_custom)
+
+        if checked:
+            self.on_aspect_ratio_changed()
+        else:
+            self.image_viewer.set_aspect_ratio(False)
+
+    def on_aspect_ratio_changed(self):
+        """アスペクト比プリセットの変更"""
+        if not self.aspect_ratio_checkbox.isChecked():
+            return
+
+        text = self.aspect_ratio_combo.currentText()
+        is_custom = text == "カスタム"
+
+        self.custom_width_spin.setEnabled(is_custom)
+        self.custom_height_spin.setEnabled(is_custom)
+
+        # プリセット比率
+        ratio_map = {
+            "1:1 (正方形)": 1.0,
+            "4:3": 4/3,
+            "3:2": 3/2,
+            "16:9": 16/9,
+            "16:10": 16/10,
+            "21:9": 21/9,
+        }
+
+        if is_custom:
+            ratio = self.custom_width_spin.value() / self.custom_height_spin.value()
+        else:
+            ratio = ratio_map.get(text, 1.0)
+
+        self.image_viewer.set_aspect_ratio(True, ratio)
+
+    def on_custom_ratio_changed(self):
+        """カスタム比率の変更"""
+        if self.aspect_ratio_checkbox.isChecked() and self.aspect_ratio_combo.currentText() == "カスタム":
+            ratio = self.custom_width_spin.value() / self.custom_height_spin.value()
+            self.image_viewer.set_aspect_ratio(True, ratio)
+
     def update_crop_info(self):
         if self.crop_rect.isEmpty():
             self.crop_info_label.setText("切り抜き範囲: 未設定")
@@ -842,14 +973,6 @@ class BatchImageCropper(QMainWindow):
             self.width_spin.blockSignals(False)
             self.height_spin.blockSignals(False)
     
-    def on_mode_changed(self):
-        if self.absolute_radio.isChecked():
-            self.crop_mode = "absolute"
-            self.proportional_radio.setChecked(False)
-        elif self.proportional_radio.isChecked():
-            self.crop_mode = "proportional"
-            self.absolute_radio.setChecked(False)
-    
     def crop_and_save_images(self):
         """切り抜きと保存を一度に実行"""
         if self.crop_rect.isEmpty():
@@ -865,16 +988,10 @@ class BatchImageCropper(QMainWindow):
         if not folder:
             return
 
+        # 現在選択中の画像と同じサイズの画像すべてを対象にする
         current_file = self.image_files[self.current_index]
         current_size = self.image_sizes.get(current_file)
-
-        if self.apply_to_all_checkbox.isChecked():
-            if self.crop_mode == "absolute":
-                files_to_crop = [f for f in self.image_files if self.image_sizes.get(f) == current_size]
-            else:
-                files_to_crop = self.image_files
-        else:
-            files_to_crop = [current_file]
+        files_to_crop = [f for f in self.image_files if self.image_sizes.get(f) == current_size]
 
         progress = QProgressDialog("画像を処理中...", "キャンセル", 0, len(files_to_crop), self)
         progress.setWindowModality(Qt.WindowModality.WindowModal)
@@ -891,24 +1008,8 @@ class BatchImageCropper(QMainWindow):
 
             image = QImage(file_path)
             if not image.isNull():
-                # 切り抜き処理
-                if self.crop_mode == "proportional" and current_size:
-                    file_size = self.image_sizes.get(file_path)
-                    if file_size and file_size != current_size:
-                        scale_x = file_size[0] / current_size[0]
-                        scale_y = file_size[1] / current_size[1]
-
-                        scaled_rect = QRect(
-                            int(self.crop_rect.x() * scale_x),
-                            int(self.crop_rect.y() * scale_y),
-                            int(self.crop_rect.width() * scale_x),
-                            int(self.crop_rect.height() * scale_y)
-                        )
-                        cropped = image.copy(scaled_rect)
-                    else:
-                        cropped = image.copy(self.crop_rect)
-                else:
-                    cropped = image.copy(self.crop_rect)
+                # 絶対座標で切り抜き
+                cropped = image.copy(self.crop_rect)
 
                 # 保存処理
                 name, ext = os.path.splitext(filename)
@@ -1029,8 +1130,7 @@ class BatchImageCropper(QMainWindow):
                 self,
                 "異なるサイズの画像を検出",
                 f"複数の画像サイズが検出されました:\n{sizes_text}\n\n"
-                "絶対座標モードでは同じサイズの画像のみが正しく切り抜かれます。\n"
-                "比率モードを使用すると、異なるサイズでも相対的に切り抜きできます。"
+                "切り抜き処理は、選択中の画像と同じサイズの画像のみに適用されます。"
             )
         
         if self.current_index == -1 and self.image_files:
